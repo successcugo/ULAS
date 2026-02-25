@@ -1,6 +1,13 @@
 """
 core.py — Business logic for ULAS.
 All persistence goes through github_store.py.
+
+Roles:
+  'ict'     — Master account. Stored in Streamlit secrets, not in users.json.
+              Can create/delete advisors and change any advisor's password.
+  'advisor' — Per-department. Can manage reps in their own dept.
+              Can change passwords of reps and co-advisors in their own dept.
+  'rep'     — Per-level. Manages attendance sessions.
 """
 
 import hashlib
@@ -13,6 +20,7 @@ from github_store import (
     read_json, write_json, delete_file, push_csv_to_lava,
 )
 from futo_data import get_school_abbr
+import streamlit as st
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 FUTO_TZ = timezone(timedelta(hours=1))
@@ -28,15 +36,15 @@ def futo_ts() -> float:
 
 
 # ── Paths in ULASDATA ─────────────────────────────────────────────────────────
-USERS_PATH     = "data/users.json"
-SETTINGS_PATH  = "data/settings.json"
+USERS_PATH    = "data/users.json"
+SETTINGS_PATH = "data/settings.json"
 
 def _session_path(school: str, department: str, level: str) -> str:
-    safe = lambda s: s.replace("/", "_").replace(" ", "_").replace("(","").replace(")","")
+    safe = lambda s: s.replace("/","_").replace(" ","_").replace("(","").replace(")","")
     return f"sessions/{safe(school)}__{safe(department)}__{level}.json"
 
 def _device_map_path(school: str, department: str, level: str, course_code: str) -> str:
-    safe = lambda s: s.replace("/", "_").replace(" ", "_").replace("(","").replace(")","")
+    safe = lambda s: s.replace("/","_").replace(" ","_").replace("(","").replace(")","")
     return f"devices/{safe(school)}__{safe(department)}__{level}__{course_code.upper()}.json"
 
 
@@ -49,9 +57,7 @@ def verify_password(pw: str, hashed: str) -> bool:
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-DEFAULT_SETTINGS = {
-    "TOKEN_LIFETIME": 7,
-}
+DEFAULT_SETTINGS = {"TOKEN_LIFETIME": 7}
 
 def load_settings() -> dict:
     data, _ = cached_read_json("__settings", SETTINGS_PATH, default=DEFAULT_SETTINGS)
@@ -63,7 +69,20 @@ def save_settings(data: dict) -> bool:
     return write_and_update_cache("__settings", SETTINGS_PATH, data, "Update settings")
 
 
-# ── Users ─────────────────────────────────────────────────────────────────────
+# ── ICT master authentication (credentials live in Streamlit secrets) ─────────
+def authenticate_ict(username: str, password: str) -> bool:
+    """
+    ICT master account. Credentials set in Streamlit secrets as:
+      ICT_USERNAME = "ict_admin"
+      ICT_PASSWORD = "your_password"
+    Returns True if credentials match.
+    """
+    expected_user = st.secrets.get("ICT_USERNAME", "ict")
+    expected_pw   = st.secrets.get("ICT_PASSWORD", "")
+    return username == expected_user and password == expected_pw and expected_pw != ""
+
+
+# ── Users (advisors + reps stored in ULASDATA) ───────────────────────────────
 def load_users() -> dict:
     data, _ = cached_read_json("__users", USERS_PATH, default={})
     return data
@@ -71,11 +90,11 @@ def load_users() -> dict:
 def save_users(users: dict) -> bool:
     ok = write_and_update_cache("__users", USERS_PATH, users, "Update users")
     if ok:
-        invalidate_cache("__users")  # force fresh read next time
+        invalidate_cache("__users")
     return ok
 
 def authenticate_user(username: str, password: str, role: str) -> dict | None:
-    """role = 'rep' or 'advisor'"""
+    """Authenticate advisor or rep. role = 'rep' | 'advisor'"""
     users = load_users()
     u = users.get(username)
     if u and u.get("role") == role and verify_password(password, u["password_hash"]):
@@ -89,16 +108,16 @@ def create_user(username: str, password: str, role: str, school: str,
                 department: str, level: str | None, created_by: str) -> tuple[bool, str]:
     users = load_users()
     if username in users:
-        return False, f"Username '{username}' already exists."
+        return False, f"Username '{username}' already exists across FUTO."
     users[username] = {
-        "username": username,
+        "username":      username,
         "password_hash": hash_password(password),
-        "role": role,          # 'rep' or 'advisor'
-        "school": school,
-        "department": department,
-        "level": level,        # None for advisors
-        "created_by": created_by,
-        "created_at": futo_now_str(),
+        "role":          role,
+        "school":        school,
+        "department":    department,
+        "level":         level,
+        "created_by":    created_by,
+        "created_at":    futo_now_str(),
     }
     ok = save_users(users)
     return (True, "Created.") if ok else (False, "GitHub write failed.")
@@ -120,12 +139,20 @@ def delete_user(username: str) -> bool:
 def get_reps_for_dept(school: str, department: str) -> list[dict]:
     users = load_users()
     return [u for u in users.values()
-            if u.get("role") == "rep" and u["school"] == school and u["department"] == department]
+            if u.get("role") == "rep"
+            and u["school"] == school
+            and u["department"] == department]
 
 def get_advisors_for_dept(school: str, department: str) -> list[dict]:
     users = load_users()
     return [u for u in users.values()
-            if u.get("role") == "advisor" and u["school"] == school and u["department"] == department]
+            if u.get("role") == "advisor"
+            and u["school"] == school
+            and u["department"] == department]
+
+def get_all_advisors() -> list[dict]:
+    users = load_users()
+    return [u for u in users.values() if u.get("role") == "advisor"]
 
 
 # ── Token ─────────────────────────────────────────────────────────────────────
@@ -139,9 +166,14 @@ def load_session(school: str, department: str, level: str) -> tuple[dict | None,
     data, sha = read_json(path)
     return data, sha
 
-def save_session(school: str, department: str, level: str, session: dict, sha: str | None = None) -> str | None:
+def save_session(school: str, department: str, level: str,
+                 session: dict, sha: str | None = None) -> str | None:
     path = _session_path(school, department, level)
-    return write_json(path, session, f"Session update: {session.get('course_code','?')} {department} L{level}", sha)
+    return write_json(
+        path, session,
+        f"Session update: {session.get('course_code','?')} {department} L{level}",
+        sha,
+    )
 
 def delete_session(school: str, department: str, level: str) -> bool:
     path = _session_path(school, department, level)
@@ -151,16 +183,16 @@ def start_session(school: str, department: str, level: str,
                   course_code: str, rep_username: str) -> tuple[dict, str | None]:
     now = futo_now()
     session = {
-        "school": school,
-        "department": department,
-        "level": level,
-        "course_code": course_code.upper().strip(),
-        "rep_username": rep_username,
-        "started_at": now.isoformat(),
-        "token": generate_token(),
-        "token_generated_at": futo_ts(),
-        "entries": [],
-        "next_sn": 1,
+        "school":              school,
+        "department":          department,
+        "level":               level,
+        "course_code":         course_code.upper().strip(),
+        "rep_username":        rep_username,
+        "started_at":          now.isoformat(),
+        "token":               generate_token(),
+        "token_generated_at":  futo_ts(),
+        "entries":             [],
+        "next_sn":             1,
     }
     sha = save_session(school, department, level, session)
     return session, sha
@@ -168,8 +200,8 @@ def start_session(school: str, department: str, level: str,
 def refresh_token(session: dict, lifetime: int) -> tuple[dict, bool]:
     age = futo_ts() - session["token_generated_at"]
     if age >= lifetime:
-        session["token"] = generate_token()
-        session["token_generated_at"] = futo_ts()
+        session["token"]               = generate_token()
+        session["token_generated_at"]  = futo_ts()
         return session, True
     return session, False
 
@@ -185,16 +217,16 @@ def validate_token(session: dict, code: str, lifetime: int) -> bool:
 
 
 # ── Entries ───────────────────────────────────────────────────────────────────
-def _name_dup(entries: list, surname: str, other_names: str, exclude_sn: int | None = None) -> bool:
+def _name_dup(entries, surname, other_names, exclude_sn=None):
     for e in entries:
         if exclude_sn and e["sn"] == exclude_sn:
             continue
-        if (e["surname"].lower() == surname.strip().lower() and
+        if (e["surname"].lower()     == surname.strip().lower() and
                 e["other_names"].lower() == other_names.strip().lower()):
             return True
     return False
 
-def _matric_dup(entries: list, matric: str, exclude_sn: int | None = None) -> bool:
+def _matric_dup(entries, matric, exclude_sn=None):
     for e in entries:
         if exclude_sn and e["sn"] == exclude_sn:
             continue
@@ -216,11 +248,11 @@ def add_entry(session: dict, surname: str, other_names: str, matric: str) -> tup
     if _matric_dup(session["entries"], matric):
         return False, "This matric number is already in the attendance."
     session["entries"].append({
-        "sn": session["next_sn"],
-        "surname": surname.strip().upper(),
+        "sn":          session["next_sn"],
+        "surname":     surname.strip().upper(),
         "other_names": other_names.strip().title(),
-        "matric": matric.strip(),
-        "time": futo_now_str(),
+        "matric":      matric.strip(),
+        "time":        futo_now_str(),
     })
     session["next_sn"] += 1
     return True, "Entry recorded."
@@ -232,9 +264,9 @@ def edit_entry(session: dict, sn: int, surname: str, other_names: str, matric: s
         return False, "Another entry already has this matric number."
     for e in session["entries"]:
         if e["sn"] == sn:
-            e["surname"] = surname.strip().upper()
+            e["surname"]     = surname.strip().upper()
             e["other_names"] = other_names.strip().title()
-            e["matric"] = matric.strip()
+            e["matric"]      = matric.strip()
             return True, "Entry updated."
     return False, "Entry not found."
 
@@ -247,11 +279,10 @@ def delete_entry(session: dict, sn: int) -> tuple[bool, str]:
 
 
 # ── Device map (anti-cheat) ───────────────────────────────────────────────────
-def check_and_register_device(school: str, department: str, level: str,
-                               course_code: str, device_id: str, matric: str) -> tuple[bool, str]:
-    """Returns (allowed, message). Registers device if allowed."""
+def check_and_register_device(school, department, level,
+                               course_code, device_id, matric) -> tuple[bool, str]:
     if not device_id:
-        return True, ""  # no cookie = can't enforce, let through
+        return True, ""
     path = _device_map_path(school, department, level, course_code)
     dm, sha = read_json(path)
     if dm is None:
@@ -267,31 +298,34 @@ def check_and_register_device(school: str, department: str, level: str,
 # ── CSV / LAVA ────────────────────────────────────────────────────────────────
 def session_to_csv(session: dict) -> str:
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["S/N", "Surname", "Other Names", "Matric Number", "Time"])
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["S/N", "Surname", "Other Names", "Matric Number", "Time"],
+    )
     writer.writeheader()
     for e in session["entries"]:
         writer.writerow({
-            "S/N": e["sn"],
-            "Surname": e["surname"],
-            "Other Names": e["other_names"],
+            "S/N":          e["sn"],
+            "Surname":      e["surname"],
+            "Other Names":  e["other_names"],
             "Matric Number": e["matric"],
-            "Time": e["time"],
+            "Time":         e["time"],
         })
     return output.getvalue()
 
 def build_csv_filename(session: dict) -> str:
     dept_safe = session["department"].replace(" ", "").replace("/", "")[:18]
-    started = datetime.fromisoformat(session["started_at"])
-    dt_str = started.strftime("%Y-%m-%d_%H-%M")
+    started   = datetime.fromisoformat(session["started_at"])
+    dt_str    = started.strftime("%Y-%m-%d_%H-%M")
     return f"{session['course_code']}_{dept_safe}_{dt_str}.csv"
 
 def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
     school_abbr = get_school_abbr(session["school"])
-    dept_safe = session["department"].replace(" ", "_").replace("/", "_")
-    filename = build_csv_filename(session)
-    lava_path = f"attendances/{school_abbr}/{dept_safe}/{filename}"
+    dept_safe   = session["department"].replace(" ", "_").replace("/", "_")
+    filename    = build_csv_filename(session)
+    lava_path   = f"attendances/{school_abbr}/{dept_safe}/{filename}"
     csv_content = session_to_csv(session)
-    commit_msg = (
+    commit_msg  = (
         f"Attendance: {session['course_code']} | "
         f"{session['department']} | Level {session['level']} | "
         f"{session['started_at'][:10]}"

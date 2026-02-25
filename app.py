@@ -53,7 +53,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     font-size: 0.75rem; color: #8b949e; margin-top: 0.4rem;
     text-transform: uppercase; letter-spacing: 1px;
 }
-/* Theme-safe cards — transparent background, inherits text colour */
 .info-card {
     background: rgba(46, 184, 46, 0.08);
     border-left: 4px solid #2eb82e;
@@ -69,7 +68,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .success-box .tick { font-size: 2.5rem; }
 .success-box h3 { color: #2eb82e; margin: 0.5rem 0 0.2rem; }
-/* Form: border only, no background — preserves Streamlit theme */
 div[data-testid="stForm"] {
     border: 1.5px solid rgba(128,128,128,0.3);
     border-radius: 12px; padding: 1.2rem 1.2rem 0.5rem;
@@ -89,12 +87,17 @@ st.markdown("""
 # ── Session state defaults ────────────────────────────────────────────────────
 DEFAULTS = {
     "mode": None,
-    "rep_user": None, "rep_session": None, "rep_session_sha": None,
+    # Rep state — persists session across reruns, never cleared by DEFAULTS loop
+    "rep_user": None,
+    "rep_session": None,       # the active session dict (kept in memory)
+    "rep_session_sha": None,
+    "rep_session_loaded": False,  # True once we've done the initial GitHub fetch
+    # Student state
     "stu_stage": "select",
     "stu_school": None, "stu_dept": None, "stu_level": None,
     "stu_session": None,
     "show_delete_confirm": None,
-    # Cascading dropdown intermediaries
+    # Cascading dropdown values
     "dd_school": None, "dd_dept": None, "dd_level": None,
 }
 for k, v in DEFAULTS.items():
@@ -146,22 +149,19 @@ if st.session_state.mode == "student":
 
     # ── STAGE: select ─────────────────────────────────────────────────────────
     if st.session_state.stu_stage == "select":
-        schools = get_schools()
-
-        # School
+        schools    = get_schools()
         cur_school = st.session_state.dd_school
-        s_opts = ["— select school —"] + schools
+        s_opts     = ["— select school —"] + schools
         st.selectbox(
             "Your School", s_opts,
             index=s_opts.index(cur_school) if cur_school in s_opts else 0,
             key="_dd_school_w", on_change=_on_school,
         )
 
-        # Department — reactive to school
         cur_school = st.session_state.dd_school
-        depts = get_departments(cur_school) if cur_school else []
-        cur_dept = st.session_state.dd_dept if st.session_state.dd_dept in depts else None
-        d_opts = ["— select department —"] + depts
+        depts      = get_departments(cur_school) if cur_school else []
+        cur_dept   = st.session_state.dd_dept if st.session_state.dd_dept in depts else None
+        d_opts     = ["— select department —"] + depts
         st.selectbox(
             "Your Department", d_opts,
             index=d_opts.index(cur_dept) if cur_dept in d_opts else 0,
@@ -169,11 +169,10 @@ if st.session_state.mode == "student":
             disabled=not cur_school,
         )
 
-        # Level — reactive to dept + school
-        cur_dept = st.session_state.dd_dept
-        levels = get_levels(cur_dept, cur_school) if cur_dept and cur_school else []
+        cur_dept  = st.session_state.dd_dept
+        levels    = get_levels(cur_dept, cur_school) if cur_dept and cur_school else []
         cur_level = st.session_state.dd_level if st.session_state.dd_level in levels else None
-        l_opts = ["— select level —"] + levels
+        l_opts    = ["— select level —"] + levels
         st.selectbox(
             "Your Level", l_opts,
             index=l_opts.index(cur_level) if cur_level in l_opts else 0,
@@ -182,14 +181,12 @@ if st.session_state.mode == "student":
         )
 
         if st.button("Check for Attendance →", type="primary"):
-            s = st.session_state.dd_school
-            d = st.session_state.dd_dept
-            l = st.session_state.dd_level
+            s, d, l = st.session_state.dd_school, st.session_state.dd_dept, st.session_state.dd_level
             if not all([s, d, l]):
                 st.error("Please select your school, department and level.")
             else:
                 with st.spinner("Checking for active attendance..."):
-                    session, sha = load_session(s, d, l)
+                    session, _ = load_session(s, d, l)
                 if not session:
                     st.warning("No attendance is currently running for your level. Check with your course rep.")
                 else:
@@ -243,7 +240,6 @@ if st.session_state.mode == "student":
         </div>""", unsafe_allow_html=True)
         st.markdown("Fill in your details. **Surname first, exactly as on your student ID.**")
 
-        # Device cookie via JS
         st.markdown("""
         <script>
         (function(){
@@ -275,7 +271,7 @@ if st.session_state.mode == "student":
             if not surname.strip():     errs.append("Surname cannot be empty.")
             if not other_names.strip(): errs.append("Other names cannot be empty.")
             ok_m, mm = validate_matric(matric)
-            if not ok_m: errs.append(mm)
+            if not ok_m:                errs.append(mm)
 
             if errs:
                 for e in errs: st.error(e)
@@ -341,6 +337,7 @@ if st.session_state.mode == "student":
 # ═══════════════════════════════════════════════════════════════════════════════
 if st.session_state.mode == "rep":
 
+    # ── Login ─────────────────────────────────────────────────────────────────
     if st.session_state.rep_user is None:
         st.markdown("## 🔐 Course Rep Login")
         if st.button("← Home"):
@@ -356,15 +353,16 @@ if st.session_state.mode == "rep":
             with st.spinner("Authenticating..."):
                 user = authenticate_user(uname, pwd, role="rep")
             if user:
-                st.session_state.rep_user = user
-                session, sha = load_session(user["school"], user["department"], user["level"])
-                st.session_state.rep_session     = session
-                st.session_state.rep_session_sha = sha
+                st.session_state.rep_user           = user
+                st.session_state.rep_session        = None
+                st.session_state.rep_session_sha    = None
+                st.session_state.rep_session_loaded = False
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
         st.stop()
 
+    # ── Rep is logged in ───────────────────────────────────────────────────────
     rep      = st.session_state.rep_user
     lifetime = load_settings().get("TOKEN_LIFETIME", 7)
 
@@ -382,10 +380,22 @@ if st.session_state.mode == "rep":
                 st.session_state[k] = v
             st.rerun()
 
-    session, sha = load_session(rep["school"], rep["department"], rep["level"])
-    st.session_state.rep_session     = session
-    st.session_state.rep_session_sha = sha
+    # ── Session loading strategy ───────────────────────────────────────────────
+    # Only fetch from GitHub once per login (when rep_session_loaded is False).
+    # After that, rep_session in st.session_state is the source of truth.
+    # This prevents the forced-logout race condition caused by re-fetching
+    # immediately after start_session writes to GitHub.
+    if not st.session_state.rep_session_loaded:
+        with st.spinner("Loading session..."):
+            session, sha = load_session(rep["school"], rep["department"], rep["level"])
+        st.session_state.rep_session        = session
+        st.session_state.rep_session_sha    = sha
+        st.session_state.rep_session_loaded = True
 
+    session = st.session_state.rep_session
+    sha     = st.session_state.rep_session_sha
+
+    # ── No active session — start one ─────────────────────────────────────────
     if not session:
         st.markdown("### ▶ Start New Attendance")
         with st.form("start_att"):
@@ -400,32 +410,46 @@ if st.session_state.mode == "rep":
                         rep["school"], rep["department"], rep["level"],
                         course_code, rep["username"],
                     )
+                # Store in session_state immediately — no re-fetch needed
                 st.session_state.rep_session     = session
                 st.session_state.rep_session_sha = sha
-                st.success(f"Attendance started for **{course_code.upper().strip()}**!")
                 st.rerun()
         st.stop()
 
+    # ── Active session — refresh token if due ─────────────────────────────────
     session, refreshed = refresh_token(session, lifetime)
     if refreshed:
         sha = save_session(rep["school"], rep["department"], rep["level"], session, sha)
+        st.session_state.rep_session     = session
+        st.session_state.rep_session_sha = sha
 
     remaining = token_remaining(session, lifetime)
 
+    # ── Token display ──────────────────────────────────────────────────────────
     st.markdown(f"### 🟢 Active — {session['course_code']}")
     st.markdown(f"""
     <div class="token-display">
         <div class="code">{session['token']}</div>
-        <div class="label">Attendance Code — share this with students</div>
+        <div class="label">Attendance Code — share this with students verbally</div>
     </div>""", unsafe_allow_html=True)
 
-    pc, sc = st.columns([4, 1])
-    with pc: st.progress(remaining / lifetime)
-    with sc: st.markdown(f"**{remaining:.0f}s**")
-    st.caption(f"Rotates every {lifetime}s · Started {session['started_at'][11:16]} · {len(session['entries'])} entries")
+    # Live countdown using st.empty + time.sleep loop
+    # This renders a real ticking bar without a page reload
+    countdown_bar  = st.empty()
+    countdown_text = st.empty()
+
+    # Draw current state immediately
+    countdown_bar.progress(remaining / lifetime)
+    countdown_text.caption(
+        f"⏱ Code refreshes in **{remaining:.0f}s** — "
+        f"rotates every {lifetime}s · "
+        f"Started {session['started_at'][11:16]} · "
+        f"{len(session['entries'])} entries"
+    )
 
     st.divider()
 
+    # ── Manual add ────────────────────────────────────────────────────────────
     with st.expander("➕ Manually Add Entry"):
         with st.form("manual_add"):
             ma_sur = st.text_input("Surname")
@@ -439,23 +463,38 @@ if st.session_state.mode == "rep":
             elif not ok_m:
                 st.error(m_msg)
             else:
-                s, s_sha = load_session(rep["school"], rep["department"], rep["level"])
-                ok, msg  = add_entry(s, ma_sur, ma_oth, ma_mat)
-                if ok:
-                    save_session(rep["school"], rep["department"], rep["level"], s, s_sha)
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+                # Re-fetch fresh copy to avoid SHA conflicts from student writes
+                fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
+                if fresh_s:
+                    ok, msg = add_entry(fresh_s, ma_sur, ma_oth, ma_mat)
+                    if ok:
+                        new_sha = save_session(rep["school"], rep["department"], rep["level"], fresh_s, fresh_sha)
+                        st.session_state.rep_session     = fresh_s
+                        st.session_state.rep_session_sha = new_sha
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+    # ── Entry table ───────────────────────────────────────────────────────────
+    # Always show latest entries by re-fetching (students may have added since last render)
+    fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
+    if fresh_s:
+        st.session_state.rep_session     = fresh_s
+        st.session_state.rep_session_sha = fresh_sha
+        session = fresh_s
+        sha     = fresh_sha
 
     st.markdown(f"#### Attendance List ({len(session['entries'])} entries)")
     if not session["entries"]:
         st.info("No entries yet. Waiting for students to sign in.")
     else:
         df = pd.DataFrame([{
-            "S/N": e["sn"], "Surname": e["surname"],
+            "S/N":        e["sn"],
+            "Surname":    e["surname"],
             "Other Names": e["other_names"],
-            "Matric No.": e["matric"], "Time": e["time"],
+            "Matric No.": e["matric"],
+            "Time":       e["time"],
         } for e in session["entries"]])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -477,10 +516,12 @@ if st.session_state.mode == "rep":
                 if not ok_m:
                     st.error(m_msg)
                 else:
-                    s, s_sha = load_session(rep["school"], rep["department"], rep["level"])
-                    ok, msg  = edit_entry(s, sel_sn, ed_sur, ed_oth, ed_mat)
+                    fs, fs_sha = load_session(rep["school"], rep["department"], rep["level"])
+                    ok, msg    = edit_entry(fs, sel_sn, ed_sur, ed_oth, ed_mat)
                     if ok:
-                        save_session(rep["school"], rep["department"], rep["level"], s, s_sha)
+                        new_sha = save_session(rep["school"], rep["department"], rep["level"], fs, fs_sha)
+                        st.session_state.rep_session     = fs
+                        st.session_state.rep_session_sha = new_sha
                         st.success(msg)
                         st.rerun()
                     else:
@@ -493,9 +534,12 @@ if st.session_state.mode == "rep":
                 y, n = st.columns(2)
                 with y:
                     if st.button("Yes", type="primary", key="yes_del"):
-                        s, s_sha = load_session(rep["school"], rep["department"], rep["level"])
-                        ok, _    = delete_entry(s, sel_sn)
-                        if ok: save_session(rep["school"], rep["department"], rep["level"], s, s_sha)
+                        fs, fs_sha = load_session(rep["school"], rep["department"], rep["level"])
+                        ok, _      = delete_entry(fs, sel_sn)
+                        if ok:
+                            new_sha = save_session(rep["school"], rep["department"], rep["level"], fs, fs_sha)
+                            st.session_state.rep_session     = fs
+                            st.session_state.rep_session_sha = new_sha
                         st.session_state.show_delete_confirm = None
                         st.rerun()
                 with n:
@@ -508,6 +552,8 @@ if st.session_state.mode == "rep":
                     st.rerun()
 
     st.divider()
+
+    # ── End attendance ────────────────────────────────────────────────────────
     st.markdown("### ⏹ End Attendance")
     st.warning(f"Closes the session and pushes to **LAVA**. Currently **{len(session['entries'])} entries**.")
 
@@ -520,8 +566,10 @@ if st.session_state.mode == "rep":
                     ok, pmsg = push_attendance_to_lava(final)
                 if ok:
                     delete_session(rep["school"], rep["department"], rep["level"])
+                    st.session_state.rep_session        = None
+                    st.session_state.rep_session_sha    = None
+                    st.session_state.rep_session_loaded = True  # stay loaded, just empty
                     st.success(f"✅ Done! {pmsg}")
-                    st.session_state.rep_session = None
                     st.balloons()
                     time.sleep(2)
                     st.rerun()
@@ -537,4 +585,8 @@ if st.session_state.mode == "rep":
             mime="text/csv", use_container_width=True,
         )
 
-    st.markdown('<meta http-equiv="refresh" content="1">', unsafe_allow_html=True)
+    # ── Live countdown tick ────────────────────────────────────────────────────
+    # Sleep 1 second then rerun so the bar and timer actually tick visibly.
+    # Placed at the very end so all widgets above render first before the sleep.
+    time.sleep(1)
+    st.rerun()

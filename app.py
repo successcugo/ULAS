@@ -83,7 +83,7 @@ def load_reps():
 
 st.title("🌿 ULAS - Universal Lecture Attendance System (FUTO)")
 
-menu = st.sidebar.selectbox("Portal", ["Advisor Login", "Course Rep Login"])
+menu = st.sidebar.selectbox("Portal", ["Student Attendance", "Advisor Login", "Course Rep Login"])
 
 # ---------------- ADVISOR LOGIN ----------------
 

@@ -1,4 +1,5 @@
-streamlit==1.29.0
-pandas==2.1.1
-requests==2.31.0
-pytz==2023.3
+streamlit
+pandas
+requests
+pytz
+bcrypt

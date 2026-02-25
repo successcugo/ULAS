@@ -1,262 +1,595 @@
+"""
+app.py — ULAS Main App
+Students sign attendance. Course reps manage attendance sessions.
+Run: streamlit run app.py
+"""
+
 import streamlit as st
+import time
 import pandas as pd
-import requests
-import base64
-import bcrypt
-import io
-from datetime import datetime
-import hashlib
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="ULAS - FUTO", layout="centered")
+from futo_data import get_schools, get_departments, get_levels
+from core import (
+    authenticate_user, load_settings, save_session, load_session,
+    start_session, refresh_token, token_remaining, validate_token,
+    add_entry, edit_entry, delete_entry, validate_matric,
+    delete_session, push_attendance_to_lava, session_to_csv,
+    build_csv_filename, check_and_register_device, futo_now_str,
+)
 
-DATA_OWNER = "successcugo"
-DATA_REPO = "ULASDATA"
-GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="ULAS — FUTO Attendance",
+    page_icon="🎓",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 
-# ---------------- GITHUB FUNCTIONS ----------------
-def gh_headers():
-    return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+# ── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-def gh_get_file(path):
-    url = f"https://api.github.com/repos/{DATA_OWNER}/{DATA_REPO}/contents/{path}"
-    r = requests.get(url, headers=gh_headers())
-    if r.status_code == 200:
-        content = r.json()["content"]
-        decoded = base64.b64decode(content).decode("utf-8")
-        return decoded
-    return None
+.hero {
+    background: linear-gradient(135deg, #006400 0%, #1a8c1a 60%, #2eb82e 100%);
+    border-radius: 16px;
+    padding: 2rem 2rem 1.5rem;
+    text-align: center;
+    color: white;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 20px rgba(0,100,0,0.3);
+}
+.hero h1 { font-size: 2rem; font-weight: 900; margin: 0; letter-spacing: -0.5px; }
+.hero .sub { font-size: 0.9rem; opacity: 0.85; margin-top: 0.3rem; }
+.hero .badge { display:inline-block; background:rgba(255,255,255,0.2);
+    border-radius:20px; padding:3px 14px; font-size:0.8rem; margin-top:0.6rem; }
 
-def gh_update_file(path, content, message):
-    url = f"https://api.github.com/repos/{DATA_OWNER}/{DATA_REPO}/contents/{path}"
-    r = requests.get(url, headers=gh_headers())
-    if r.status_code != 200:
-        st.error("Could not fetch file SHA from GitHub.")
-        st.stop()
-    sha = r.json()["sha"]
-    encoded = base64.b64encode(content.encode()).decode()
-    data = {"message": message, "content": encoded, "sha": sha}
-    requests.put(url, headers=gh_headers(), json=data)
+.token-display {
+    background: #0d1117;
+    border: 2px solid #00e676;
+    border-radius: 14px;
+    padding: 1.5rem 1rem;
+    text-align: center;
+    margin: 0.8rem 0;
+}
+.token-display .code {
+    font-size: 3.5rem;
+    font-weight: 900;
+    letter-spacing: 0.6rem;
+    color: #00e676;
+    font-family: monospace;
+    line-height: 1;
+}
+.token-display .label {
+    font-size: 0.75rem;
+    color: #8b949e;
+    margin-top: 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
 
-# ---------------- SECURITY FUNCTIONS ----------------
-def hash_password(password):
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+.info-card {
+    background: #f0faf0;
+    border-left: 4px solid #006400;
+    border-radius: 0 8px 8px 0;
+    padding: 0.8rem 1rem;
+    margin: 0.6rem 0;
+    font-size: 0.9rem;
+}
+.info-card b { color: #006400; }
 
-def verify_password(input_pw, stored_hash):
-    return bcrypt.checkpw(input_pw.encode(), stored_hash.encode())
+.success-box {
+    background: #e6ffe6;
+    border: 1.5px solid #00b300;
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+}
+.success-box .tick { font-size: 2.5rem; }
+.success-box h3 { color: #006400; margin: 0.5rem 0 0.2rem; }
 
-# ---------------- LOAD DATA ----------------
-def load_advisors():
-    data = gh_get_file("advisors.csv")
-    if data:
-        return pd.read_csv(io.StringIO(data))
-    return pd.DataFrame()
+div[data-testid="stForm"] {
+    border: 1.5px solid #e0e0e0;
+    border-radius: 12px;
+    padding: 1.2rem 1.2rem 0.5rem;
+    background: #fafafa;
+}
+.stButton > button { border-radius: 8px; font-weight: 600; transition: all 0.2s; }
+.mode-btn { font-size: 1.1rem !important; padding: 1.2rem !important; }
+</style>
+""", unsafe_allow_html=True)
 
-def load_reps():
-    data = gh_get_file("course_reps.csv")
-    if data:
-        return pd.read_csv(io.StringIO(data))
-    return pd.DataFrame()
+# ── Hero ──────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+    <h1>🎓 ULAS</h1>
+    <div class="sub">Universal Lecture Attendance System</div>
+    <div class="badge">Federal University of Technology, Owerri</div>
+</div>
+""", unsafe_allow_html=True)
 
-# ---------------- SIDEBAR MENU ----------------
-menu = st.sidebar.selectbox("Portal", ["Student Attendance", "Advisor Login", "Course Rep Login"])
+# ── Session state init ────────────────────────────────────────────────────────
+DEFAULTS = {
+    "mode": None,
+    "rep_user": None,
+    "rep_session": None,
+    "rep_session_sha": None,
+    "stu_stage": "select",
+    "stu_school": None, "stu_dept": None, "stu_level": None,
+    "stu_session": None,
+    "stu_verified": False,
+    "show_delete_confirm": None,
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ---------------- STUDENT ATTENDANCE ----------------
-if menu == "Student Attendance":
-    st.subheader("Student Attendance Portal")
 
-    # Load schools & departments dynamically from advisors.csv
-    advisors = load_advisors()
-    if advisors.empty:
-        st.error("No data found for schools/departments.")
-        st.stop()
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HOME — mode selection
+# ═══════════════════════════════════════════════════════════════════════════════
+if st.session_state.mode is None:
+    st.markdown("### How are you using ULAS today?")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("👤  I'm a Student\n\nSign attendance", use_container_width=True):
+            st.session_state.mode = "student"
+            st.rerun()
+    with col2:
+        if st.button("🔐  Course Rep\n\nManage attendance", use_container_width=True):
+            st.session_state.mode = "rep"
+            st.rerun()
+    st.stop()
 
-    schools = sorted(advisors["school"].unique())
-    school = st.selectbox("Select School", schools)
 
-    departments = sorted(advisors[advisors["school"] == school]["department"].unique())
-    department = st.selectbox("Select Department", departments)
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STUDENT FLOW
+# ═══════════════════════════════════════════════════════════════════════════════
+if st.session_state.mode == "student":
 
-    level = st.selectbox("Select Level", [100,200,300,400,500,600])
-
-    code = st.text_input("Enter 4-digit Attendance Code")
-
-    surname = st.text_input("Surname")
-    other_names = st.text_input("Other Names")
-    matric_number = st.text_input("Matric Number (11 digits)")
-
-    # Generate a device id cookie
-    device_id = hashlib.sha256(st.session_state.get('session_id', str(datetime.now()).encode()).encode() if 'session_id' not in st.session_state else st.session_state['session_id'].encode()).hexdigest()
-
-    if st.button("Submit Attendance"):
-
-        # ---------------- VALIDATION ----------------
-        if not surname or not other_names or not matric_number or not code:
-            st.error("All fields are required.")
-            st.stop()
-        if len(matric_number) != 11 or not matric_number.isdigit():
-            st.error("Matric number must be exactly 11 digits.")
-            st.stop()
-
-        # Prepare attendance file path
-        today = datetime.now().strftime("%Y-%m-%d")
-        path = f"attendances/{school}/{department}/{level}_{today}.csv"
-
-        existing_data = gh_get_file(path)
-        if existing_data:
-            df = pd.read_csv(io.StringIO(existing_data))
-            # Check duplicates: matric and surname
-            if df['matric_number'].astype(str).str.strip().str.lower().isin([matric_number.lower()]).any():
-                st.error("Matric number already recorded.")
-                st.stop()
-            if df['surname'].astype(str).str.strip().str.lower().isin([surname.lower()]).any():
-                st.error("Surname already recorded.")
-                st.stop()
-            # Anti-cheat: check device_id column
-            if 'device_id' in df.columns and df['device_id'].astype(str).str.contains(device_id).any():
-                st.error("This device has already submitted attendance.")
-                st.stop()
-        else:
-            df = pd.DataFrame(columns=["S/N","surname","other_names","matric_number","time","device_id"])
-
-        # Add new record
-        sn = len(df)+1
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        df.loc[len(df)] = [sn, surname.title(), other_names.title(), matric_number, timestamp, device_id]
-
-        updated_csv = df.to_csv(index=False)
-        gh_update_file(path, updated_csv, f"Student attendance: {surname} {other_names}")
-
-        st.success(f"Attendance recorded for {surname.title()} {other_names}.")
-
-# ---------------- ADVISOR LOGIN ----------------
-elif menu == "Advisor Login":
-    st.subheader("Advisor Login")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-
-        advisors = load_advisors()
-        if "username" not in advisors.columns or "password" not in advisors.columns:
-            st.error("advisors.csv is incorrectly structured.")
-            st.stop()
-
-        if username in advisors["username"].values:
-            row = advisors[advisors["username"] == username].iloc[0]
-            if verify_password(password, row["password"]):
-                st.session_state["role"] = "advisor"
-                st.session_state["user"] = row
-                st.success("Login successful")
-                st.rerun()
-            else:
-                st.error("Incorrect password")
-        else:
-            st.error("User not found")
-
-# ---------------- COURSE REP LOGIN ----------------
-elif menu == "Course Rep Login":
-    st.subheader("Course Rep Login")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-
-        reps = load_reps()
-        if "username" not in reps.columns or "password" not in reps.columns:
-            st.error("course_reps.csv is incorrectly structured.")
-            st.stop()
-
-        if username in reps["username"].values:
-            row = reps[reps["username"] == username].iloc[0]
-            if verify_password(password, row["password"]):
-                st.session_state["role"] = "rep"
-                st.session_state["user"] = row
-                st.success("Login successful")
-                st.rerun()
-            else:
-                st.error("Incorrect password")
-        else:
-            st.error("User not found")
-
-# ---------------- DASHBOARD ----------------
-if "role" in st.session_state:
-    st.sidebar.success(f"Logged in as {st.session_state['role']}")
-
-    if st.sidebar.button("Logout"):
-        st.session_state.clear()
+    if st.button("← Home"):
+        for k, v in DEFAULTS.items():
+            st.session_state[k] = v
         st.rerun()
 
-    st.header("Dashboard")
+    st.markdown("## 📋 Sign Attendance")
 
-    # ---------------- COURSE REP DASHBOARD ----------------
-    if st.session_state["role"] == "rep":
-        st.subheader("Mark Attendance")
+    # ── STAGE: select ─────────────────────────────────────────────────────────
+    if st.session_state.stu_stage == "select":
+        with st.form("stu_select"):
+            schools = get_schools()
+            school = st.selectbox("Your School", ["— select —"] + schools)
+            depts = get_departments(school) if school != "— select —" else []
+            dept = st.selectbox("Your Department", ["— select —"] + depts)
+            levels = get_levels(dept, school) if dept != "— select —" and school != "— select —" else []
+            level = st.selectbox("Your Level", ["— select —"] + levels)
+            go = st.form_submit_button("Check for Attendance →", type="primary")
 
-        course = st.text_input("Course Code")
-        topic = st.text_input("Lecture Topic")
-
-        if st.button("Submit Attendance"):
-
-            if not course or not topic:
-                st.error("All fields required.")
-                st.stop()
-
-            today = datetime.now().strftime("%Y-%m-%d")
-            attendance_line = f"{today},{course},{topic},{st.session_state['user']['department']}\n"
-
-            existing = gh_get_file("attendance.csv")
-            if existing:
-                updated = existing + attendance_line
+        if go:
+            if "— select —" in (school, dept, level):
+                st.error("Please make all three selections.")
             else:
-                updated = "date,course,topic,department\n" + attendance_line
+                with st.spinner("Checking for active attendance..."):
+                    session, sha = load_session(school, dept, level)
+                if not session:
+                    st.warning("No attendance is currently running for your level. Check with your course rep.")
+                else:
+                    st.session_state.stu_school = school
+                    st.session_state.stu_dept = dept
+                    st.session_state.stu_level = level
+                    st.session_state.stu_session = session
+                    st.session_state.stu_stage = "code"
+                    st.rerun()
 
-            gh_update_file("attendance.csv", updated, "Updated attendance record")
-            st.success("Attendance recorded successfully.")
+    # ── STAGE: code ───────────────────────────────────────────────────────────
+    elif st.session_state.stu_stage == "code":
+        session = st.session_state.stu_session
+        settings = load_settings()
+        lifetime = settings.get("TOKEN_LIFETIME", 7)
 
-    # ---------------- ADVISOR DASHBOARD ----------------
-    if st.session_state["role"] == "advisor":
-        advisor_dept = st.session_state["user"]["department"]
-        st.subheader("Manage Course Reps")
+        st.markdown(f"""
+        <div class="info-card">
+            <b>Course:</b> {session['course_code']} &nbsp;|&nbsp;
+            <b>Department:</b> {session['department']} &nbsp;|&nbsp;
+            <b>Level:</b> {session['level']}L
+        </div>
+        """, unsafe_allow_html=True)
 
-        reps = load_reps()
-        if reps.empty:
-            st.info("No reps found.")
-        else:
-            dept_reps = reps[reps["department"] == advisor_dept]
-            if dept_reps.empty:
-                st.info("No course reps in your department.")
+        st.markdown("Enter the **4-digit code** currently shown on your course rep's screen.")
+
+        with st.form("code_form"):
+            code = st.text_input("Attendance Code", max_chars=4, placeholder="e.g. 4823")
+            verify = st.form_submit_button("Verify →", type="primary")
+
+        if verify:
+            # Always fetch the freshest session for token check
+            with st.spinner("Verifying..."):
+                fresh, _ = load_session(
+                    st.session_state.stu_school,
+                    st.session_state.stu_dept,
+                    st.session_state.stu_level,
+                )
+            if not fresh:
+                st.error("The attendance has ended. Please contact your course rep.")
+                st.session_state.stu_stage = "select"
+            elif validate_token(fresh, code, lifetime):
+                st.session_state.stu_session = fresh
+                st.session_state.stu_verified = True
+                st.session_state.stu_stage = "entry"
+                st.rerun()
             else:
-                for index, row in dept_reps.iterrows():
-                    st.markdown(f"### {row['username']}")
+                st.error("❌ Invalid or expired code. Ask your rep for the latest code and try again.")
 
-                    new_username = st.text_input("Edit Username",
-                        value=row["username"], key=f"user_{index}")
-                    new_password = st.text_input("Reset Password (leave blank to keep same)",
-                        type="password", key=f"pass_{index}")
+    # ── STAGE: entry ──────────────────────────────────────────────────────────
+    elif st.session_state.stu_stage == "entry":
+        session = st.session_state.stu_session
 
-                    if st.button("Update", key=f"btn_{index}"):
-                        if new_username != row["username"]:
-                            if new_username in reps["username"].values:
-                                st.error("Username already exists globally.")
-                                st.stop()
-                        reps.loc[index, "username"] = new_username
-                        if new_password:
-                            reps.loc[index, "password"] = hash_password(new_password)
-                        updated_csv = reps.to_csv(index=False)
-                        gh_update_file("course_reps.csv", updated_csv, "Advisor updated rep credentials")
-                        st.success("Updated successfully.")
+        st.markdown(f"""
+        <div class="info-card">
+            <b>Course:</b> {session['course_code']} &nbsp;|&nbsp;
+            <b>Dept:</b> {session['department']} &nbsp;|&nbsp;
+            <b>Level:</b> {session['level']}L
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown("Fill in your details below. **Surname first, exactly as on your ID.**")
+
+        # Inject JS to get/set device cookie
+        st.markdown("""
+        <input type="hidden" id="ulas_device_id_val">
+        <script>
+        (function() {
+            function getCookie(name) {
+                var v = document.cookie.match('(^|;) ?' + name + '=([^;]*)(;|$)');
+                return v ? v[2] : null;
+            }
+            function setCookie(name, value, days) {
+                var d = new Date();
+                d.setTime(d.getTime() + 24*60*60*1000*days);
+                document.cookie = name + '=' + value + ';expires=' + d.toUTCString() + ';path=/;SameSite=Lax';
+            }
+            var id = getCookie('ulas_device_id');
+            if (!id) {
+                id = 'dev_' + Math.random().toString(36).substring(2,10) + '_' + Date.now();
+                setCookie('ulas_device_id', id, 365);
+            }
+            // Try to push into the hidden Streamlit text input
+            function tryInject() {
+                var inputs = window.parent.document.querySelectorAll('input[aria-label="device_id"]');
+                if (inputs.length > 0) {
+                    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    nativeInputValueSetter.call(inputs[0], id);
+                    inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+                } else {
+                    setTimeout(tryInject, 200);
+                }
+            }
+            tryInject();
+        })();
+        </script>
+        """, unsafe_allow_html=True)
+
+        with st.form("entry_form"):
+            surname = st.text_input("Surname (Family Name)", placeholder="e.g. OKAFOR")
+            other_names = st.text_input("Other Names", placeholder="e.g. Chukwuemeka John")
+            matric = st.text_input("Matric Number (11 digits)", placeholder="20200123456", max_chars=11)
+            device_id = st.text_input("device_id", label_visibility="collapsed", key="device_id_input")
+            submit = st.form_submit_button("✅ Sign Attendance", type="primary")
+
+        if submit:
+            errors = []
+            if not surname.strip():
+                errors.append("Surname cannot be empty.")
+            if not other_names.strip():
+                errors.append("Other names cannot be empty.")
+            ok_mat, mat_msg = validate_matric(matric)
+            if not ok_mat:
+                errors.append(mat_msg)
+
+            if errors:
+                for e in errors:
+                    st.error(e)
+            else:
+                dev_id = st.session_state.get("device_id_input", "").strip()
+
+                # Re-fetch fresh session
+                with st.spinner("Submitting..."):
+                    current, sha = load_session(
+                        st.session_state.stu_school,
+                        st.session_state.stu_dept,
+                        st.session_state.stu_level,
+                    )
+
+                if not current:
+                    st.error("Attendance ended before you could submit. Contact your course rep.")
+                    st.session_state.stu_stage = "select"
+                    st.rerun()
+
+                # Device anti-cheat
+                allowed, dev_msg = check_and_register_device(
+                    st.session_state.stu_school,
+                    st.session_state.stu_dept,
+                    st.session_state.stu_level,
+                    current["course_code"],
+                    dev_id, matric,
+                )
+                if not allowed:
+                    st.error(dev_msg)
+                else:
+                    ok, msg = add_entry(current, surname, other_names, matric)
+                    if ok:
+                        new_sha = save_session(
+                            st.session_state.stu_school,
+                            st.session_state.stu_dept,
+                            st.session_state.stu_level,
+                            current, sha,
+                        )
+                        if new_sha:
+                            st.session_state.stu_session = current
+                            st.session_state.stu_stage = "done"
+                            st.rerun()
+                        else:
+                            st.error("Could not save your entry. Please try again.")
+                    else:
+                        st.error(msg)
+
+    # ── STAGE: done ───────────────────────────────────────────────────────────
+    elif st.session_state.stu_stage == "done":
+        session = st.session_state.stu_session
+        last = session["entries"][-1] if session["entries"] else {}
+        st.markdown(f"""
+        <div class="success-box">
+            <div class="tick">✅</div>
+            <h3>Attendance Recorded!</h3>
+            <p style="color:#444; margin:0">
+                <b>{last.get('surname','')} {last.get('other_names','')}</b><br>
+                Matric: {last.get('matric','')} &nbsp;|&nbsp; Time: {last.get('time','')}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="info-card" style="margin-top:1rem">
+            <b>Course:</b> {session['course_code']} &nbsp;|&nbsp;
+            <b>Dept:</b> {session['department']} &nbsp;|&nbsp;
+            <b>Level:</b> {session['level']}L
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COURSE REP FLOW
+# ═══════════════════════════════════════════════════════════════════════════════
+if st.session_state.mode == "rep":
+
+    # ── Login ─────────────────────────────────────────────────────────────────
+    if st.session_state.rep_user is None:
+        st.markdown("## 🔐 Course Rep Login")
+        if st.button("← Home"):
+            st.session_state.mode = None
+            st.rerun()
+
+        with st.form("rep_login"):
+            uname = st.text_input("Username")
+            pwd = st.text_input("Password", type="password")
+            login = st.form_submit_button("Login", type="primary")
+
+        if login:
+            with st.spinner("Authenticating..."):
+                user = authenticate_user(uname, pwd, role="rep")
+            if user:
+                st.session_state.rep_user = user
+                session, sha = load_session(user["school"], user["department"], user["level"])
+                st.session_state.rep_session = session
+                st.session_state.rep_session_sha = sha
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+        st.stop()
+
+    # ── Rep is logged in ───────────────────────────────────────────────────────
+    rep = st.session_state.rep_user
+    settings = load_settings()
+    lifetime = settings.get("TOKEN_LIFETIME", 7)
+
+    # Header
+    hcol1, hcol2 = st.columns([5, 1])
+    with hcol1:
+        st.markdown(f"## 📊 Rep Dashboard")
+        st.markdown(f"""
+        <div class="info-card">
+            <b>{rep['username']}</b> &nbsp;·&nbsp;
+            {rep['department']} &nbsp;·&nbsp;
+            Level <b>{rep['level']}L</b> &nbsp;·&nbsp;
+            {rep['school']}
+        </div>
+        """, unsafe_allow_html=True)
+    with hcol2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Logout"):
+            for k, v in DEFAULTS.items():
+                st.session_state[k] = v
+            st.rerun()
+
+    # Always reload session from GitHub (not cache) so it's fresh
+    session, sha = load_session(rep["school"], rep["department"], rep["level"])
+    st.session_state.rep_session = session
+    st.session_state.rep_session_sha = sha
+
+    # ── No active session ──────────────────────────────────────────────────────
+    if not session:
+        st.markdown("### ▶ Start New Attendance")
+        with st.form("start_att"):
+            course_code = st.text_input("Course Code", placeholder="e.g. CSC301")
+            start_btn = st.form_submit_button("Start Attendance", type="primary")
+        if start_btn:
+            if not course_code.strip():
+                st.error("Please enter a course code.")
+            else:
+                with st.spinner("Starting attendance..."):
+                    session, sha = start_session(
+                        rep["school"], rep["department"], rep["level"],
+                        course_code, rep["username"],
+                    )
+                st.session_state.rep_session = session
+                st.session_state.rep_session_sha = sha
+                st.success(f"Attendance started for **{course_code.upper().strip()}**!")
+                st.rerun()
+        st.stop()
+
+    # ── Active session ─────────────────────────────────────────────────────────
+    # Refresh token if needed
+    session, refreshed = refresh_token(session, lifetime)
+    if refreshed:
+        sha = save_session(rep["school"], rep["department"], rep["level"], session, sha)
+        st.session_state.rep_session_sha = sha
+
+    remaining = token_remaining(session, lifetime)
+
+    st.markdown(f"### 🟢 Active — {session['course_code']}")
+
+    # Token box
+    st.markdown(f"""
+    <div class="token-display">
+        <div class="code">{session['token']}</div>
+        <div class="label">Attendance Code — share this with students</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    prog_col, sec_col = st.columns([4, 1])
+    with prog_col:
+        st.progress(remaining / lifetime)
+    with sec_col:
+        st.markdown(f"**{remaining:.0f}s**")
+
+    st.caption(f"Code rotates every {lifetime}s · Started {session['started_at'][11:16]} · {len(session['entries'])} entries")
+
+    st.divider()
+
+    # ── Manual add ────────────────────────────────────────────────────────────
+    with st.expander("➕ Manually Add Entry"):
+        with st.form("manual_add"):
+            ma_sur = st.text_input("Surname", key="ma_sur")
+            ma_oth = st.text_input("Other Names", key="ma_oth")
+            ma_mat = st.text_input("Matric Number (11 digits)", key="ma_mat", max_chars=11)
+            ma_btn = st.form_submit_button("Add Entry")
+        if ma_btn:
+            ok_m, m_msg = validate_matric(ma_mat)
+            if not ma_sur.strip() or not ma_oth.strip():
+                st.error("Name fields cannot be empty.")
+            elif not ok_m:
+                st.error(m_msg)
+            else:
+                s, s_sha = load_session(rep["school"], rep["department"], rep["level"])
+                ok, msg = add_entry(s, ma_sur, ma_oth, ma_mat)
+                if ok:
+                    save_session(rep["school"], rep["department"], rep["level"], s, s_sha)
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    # ── Entry table ───────────────────────────────────────────────────────────
+    st.markdown(f"#### Attendance List ({len(session['entries'])} entries)")
+
+    if not session["entries"]:
+        st.info("No entries yet. Waiting for students to sign in.")
+    else:
+        df = pd.DataFrame([{
+            "S/N": e["sn"],
+            "Surname": e["surname"],
+            "Other Names": e["other_names"],
+            "Matric No.": e["matric"],
+            "Time": e["time"],
+        } for e in session["entries"]])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # ── Edit / Delete controls ─────────────────────────────────────────
+        st.markdown("**Edit or Delete an Entry**")
+        opts = {f"S/N {e['sn']} — {e['surname']} {e['other_names']}": e["sn"]
+                for e in session["entries"]}
+        sel_label = st.selectbox("Select entry to modify", list(opts.keys()))
+        sel_sn = opts[sel_label]
+        sel_entry = next(e for e in session["entries"] if e["sn"] == sel_sn)
+
+        edit_col, del_col = st.columns([3, 1])
+        with edit_col:
+            with st.form("edit_form"):
+                ed_sur = st.text_input("Surname", value=sel_entry["surname"])
+                ed_oth = st.text_input("Other Names", value=sel_entry["other_names"])
+                ed_mat = st.text_input("Matric Number", value=sel_entry["matric"], max_chars=11)
+                ed_btn = st.form_submit_button("✏️ Save Edit")
+            if ed_btn:
+                ok_m, m_msg = validate_matric(ed_mat)
+                if not ok_m:
+                    st.error(m_msg)
+                else:
+                    s, s_sha = load_session(rep["school"], rep["department"], rep["level"])
+                    ok, msg = edit_entry(s, sel_sn, ed_sur, ed_oth, ed_mat)
+                    if ok:
+                        save_session(rep["school"], rep["department"], rep["level"], s, s_sha)
+                        st.success(msg)
                         st.rerun()
+                    else:
+                        st.error(msg)
 
-        st.divider()
-        st.subheader("View Department Attendance")
+        with del_col:
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            if st.session_state.show_delete_confirm == sel_sn:
+                st.warning(f"Delete S/N {sel_sn}?")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Yes", type="primary", key="confirm_del"):
+                        s, s_sha = load_session(rep["school"], rep["department"], rep["level"])
+                        ok, msg = delete_entry(s, sel_sn)
+                        if ok:
+                            save_session(rep["school"], rep["department"], rep["level"], s, s_sha)
+                        st.session_state.show_delete_confirm = None
+                        st.rerun()
+                with c2:
+                    if st.button("No", key="cancel_del"):
+                        st.session_state.show_delete_confirm = None
+                        st.rerun()
+            else:
+                if st.button(f"🗑️ Delete", key="del_btn"):
+                    st.session_state.show_delete_confirm = sel_sn
+                    st.rerun()
 
-        data = gh_get_file("attendance.csv")
-        if data:
-            df = pd.read_csv(io.StringIO(data))
-            df = df[df["department"] == advisor_dept]
-            st.dataframe(df)
-        else:
-            st.info("No attendance records yet.")
+    st.divider()
+
+    # ── End attendance ────────────────────────────────────────────────────────
+    st.markdown("### ⏹ End Attendance")
+    st.warning(f"This will close the session and push the record to **LAVA**. Currently **{len(session['entries'])} entries**.")
+
+    end_col, dl_col = st.columns(2)
+    with end_col:
+        if st.button("End & Push to LAVA", type="primary", use_container_width=True):
+            final_session, final_sha = load_session(rep["school"], rep["department"], rep["level"])
+            if final_session:
+                with st.spinner("Pushing to LAVA..."):
+                    ok, push_msg = push_attendance_to_lava(final_session)
+                if ok:
+                    delete_session(rep["school"], rep["department"], rep["level"])
+                    st.success(f"✅ Done! {push_msg}")
+                    st.session_state.rep_session = None
+                    st.session_state.rep_session_sha = None
+                    st.balloons()
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error(f"Push failed: {push_msg}\n\nSession is still open. Download a local backup.")
+            else:
+                st.error("Session not found.")
+
+    with dl_col:
+        csv_data = session_to_csv(session)
+        fname = build_csv_filename(session)
+        st.download_button(
+            "⬇️ Download CSV Backup",
+            csv_data, file_name=fname, mime="text/csv",
+            use_container_width=True,
+        )
+
+    # ── Auto-refresh for live token countdown ─────────────────────────────────
+    st.markdown('<meta http-equiv="refresh" content="1">', unsafe_allow_html=True)

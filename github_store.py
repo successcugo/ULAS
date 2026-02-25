@@ -3,6 +3,7 @@ github_store.py
 All interaction with GitHub repos (ULASDATA and LAVA) goes through this module.
 Uses the GitHub Contents API for reading and writing files.
 """
+from __future__ import annotations
 
 import json
 import base64

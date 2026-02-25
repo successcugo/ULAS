@@ -9,6 +9,7 @@ Access levels:
                   Can change passwords of reps AND co-advisors in their own dept.
                   Cannot create or delete advisor accounts.
 """
+from __future__ import annotations
 
 import streamlit as st
 import sys

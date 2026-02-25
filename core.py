@@ -9,6 +9,7 @@ Roles:
               Can change passwords of reps and co-advisors in their own dept.
   'rep'     — Per-level. Manages attendance sessions.
 """
+from __future__ import annotations
 
 import hashlib
 import random

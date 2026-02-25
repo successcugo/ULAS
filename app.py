@@ -2,6 +2,7 @@
 app.py — ULAS Main App
 Students sign attendance. Course reps manage attendance sessions.
 """
+from __future__ import annotations
 
 import streamlit as st
 import time

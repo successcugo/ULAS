@@ -7,6 +7,7 @@ from __future__ import annotations
 import streamlit as st
 import time
 import pandas as pd
+from streamlit_autorefresh import st_autorefresh
 
 from futo_data import get_schools, get_departments, get_levels
 from core import (
@@ -417,7 +418,12 @@ if st.session_state.mode == "rep":
                 st.rerun()
         st.stop()
 
-    # ── Active session — refresh token if due ─────────────────────────────────
+    # ── Auto-refresh every 1 s via JS — never blocks widget interactions ────────
+    # st_autorefresh returns the number of times it has refreshed.
+    # Placed before any rendering so the tick count is available immediately.
+    _tick = st_autorefresh(interval=1000, limit=None, key="rep_autorefresh")
+
+    # ── Refresh token if due, using in-memory session ─────────────────────────
     session, refreshed = refresh_token(session, lifetime)
     if refreshed:
         sha = save_session(rep["school"], rep["department"], rep["level"], session, sha)
@@ -426,7 +432,7 @@ if st.session_state.mode == "rep":
 
     remaining = token_remaining(session, lifetime)
 
-    # ── Token display ──────────────────────────────────────────────────────────
+    # ── Token display — rendered FIRST so it is never delayed by GitHub fetches ─
     st.markdown(f"### 🟢 Active — {session['course_code']}")
     st.markdown(f"""
     <div class="token-display">
@@ -434,15 +440,9 @@ if st.session_state.mode == "rep":
         <div class="label">Attendance Code — share this with students verbally</div>
     </div>""", unsafe_allow_html=True)
 
-    # Live countdown using st.empty + time.sleep loop
-    # This renders a real ticking bar without a page reload
-    countdown_bar  = st.empty()
-    countdown_text = st.empty()
-
-    # Draw current state immediately
-    countdown_bar.progress(remaining / lifetime)
-    countdown_text.caption(
-        f"⏱ Code refreshes in **{remaining:.0f}s** — "
+    st.progress(remaining / lifetime)
+    st.caption(
+        f"⏱ Code refreshes in **{remaining:.0f}s** · "
         f"rotates every {lifetime}s · "
         f"Started {session['started_at'][11:16]} · "
         f"{len(session['entries'])} entries"
@@ -464,7 +464,6 @@ if st.session_state.mode == "rep":
             elif not ok_m:
                 st.error(m_msg)
             else:
-                # Re-fetch fresh copy to avoid SHA conflicts from student writes
                 fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
                 if fresh_s:
                     ok, msg = add_entry(fresh_s, ma_sur, ma_oth, ma_mat)
@@ -477,14 +476,16 @@ if st.session_state.mode == "rep":
                     else:
                         st.error(msg)
 
-    # ── Entry table ───────────────────────────────────────────────────────────
-    # Always show latest entries by re-fetching (students may have added since last render)
-    fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
-    if fresh_s:
-        st.session_state.rep_session     = fresh_s
-        st.session_state.rep_session_sha = fresh_sha
-        session = fresh_s
-        sha     = fresh_sha
+    # ── Entry table — fetch from GitHub every 5 ticks (~5s) not every tick ────
+    # This prevents GitHub latency from blocking the token display on every rerun.
+    if _tick % 5 == 0 or "rep_entries_loaded" not in st.session_state:
+        fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
+        if fresh_s:
+            st.session_state.rep_session      = fresh_s
+            st.session_state.rep_session_sha  = fresh_sha
+            st.session_state.rep_entries_loaded = True
+            session = fresh_s
+            sha     = fresh_sha
 
     st.markdown(f"#### Attendance List ({len(session['entries'])} entries)")
     if not session["entries"]:
@@ -575,7 +576,8 @@ if st.session_state.mode == "rep":
                     time.sleep(2)
                     st.rerun()
                 else:
-                    st.error(f"Push failed: {pmsg}\n\nSession still open — download backup below.")
+                    st.error("Push failed — session still open. Download backup below.")
+                    st.markdown(pmsg)
             else:
                 st.error("Session not found.")
     with e2:
@@ -586,8 +588,4 @@ if st.session_state.mode == "rep":
             mime="text/csv", use_container_width=True,
         )
 
-    # ── Live countdown tick ────────────────────────────────────────────────────
-    # Sleep 1 second then rerun so the bar and timer actually tick visibly.
-    # Placed at the very end so all widgets above render first before the sleep.
-    time.sleep(1)
-    st.rerun()
+    # Auto-refresh is handled by st_autorefresh above — no sleep needed.

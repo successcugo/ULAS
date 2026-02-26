@@ -7,7 +7,6 @@ from __future__ import annotations
 import streamlit as st
 import time
 import pandas as pd
-from streamlit_autorefresh import st_autorefresh
 
 from futo_data import get_schools, get_departments, get_levels
 from core import (
@@ -99,6 +98,7 @@ DEFAULTS = {
     "stu_school": None, "stu_dept": None, "stu_level": None,
     "stu_session": None,
     "show_delete_confirm": None,
+    "pending_end": False,
     # Cascading dropdown values
     "dd_school": None, "dd_dept": None, "dd_level": None,
 }
@@ -418,11 +418,6 @@ if st.session_state.mode == "rep":
                 st.rerun()
         st.stop()
 
-    # ── Auto-refresh every 1 s via JS — never blocks widget interactions ────────
-    # st_autorefresh returns the number of times it has refreshed.
-    # Placed before any rendering so the tick count is available immediately.
-    _tick = st_autorefresh(interval=1000, limit=None, key="rep_autorefresh")
-
     # ── Refresh token if due, using in-memory session ─────────────────────────
     session, refreshed = refresh_token(session, lifetime)
     if refreshed:
@@ -559,19 +554,21 @@ if st.session_state.mode == "rep":
     st.markdown("### ⏹ End Attendance")
     st.warning(f"Closes the session and pushes to **LAVA**. Currently **{len(session['entries'])} entries**.")
 
-    e1, e2 = st.columns(2)
-    with e1:
-        if st.button("End & Push to LAVA", type="primary", use_container_width=True):
+    # Process a pending end-session (set on previous run when button was clicked).
+    # Doing the actual work here — on a fresh script run — ensures the 1-second
+    # countdown rerun cannot interrupt the GitHub API calls mid-flight.
+    if st.session_state.pending_end:
+        st.session_state.pending_end = False
+        with st.spinner("Pushing to LAVA..."):
             final, fsha = load_session(rep["school"], rep["department"], rep["level"])
             if final:
-                with st.spinner("Pushing to LAVA..."):
-                    ok, pmsg = push_attendance_to_lava(final)
+                ok, pmsg = push_attendance_to_lava(final)
                 if ok:
                     delete_session(rep["school"], rep["department"], rep["level"])
                     st.session_state.rep_session        = None
                     st.session_state.rep_session_sha    = None
-                    st.session_state.rep_session_loaded = True  # stay loaded, just empty
-                    st.success(f"✅ Done! {pmsg}")
+                    st.session_state.rep_session_loaded = True
+                    st.success("✅ Attendance pushed to LAVA successfully!")
                     st.balloons()
                     time.sleep(2)
                     st.rerun()
@@ -580,6 +577,14 @@ if st.session_state.mode == "rep":
                     st.markdown(pmsg)
             else:
                 st.error("Session not found.")
+        st.stop()
+
+    e1, e2 = st.columns(2)
+    with e1:
+        if st.button("End & Push to LAVA", type="primary", use_container_width=True):
+            # Just set the flag and rerun — actual work happens at top of next run
+            st.session_state.pending_end = True
+            st.rerun()
     with e2:
         st.download_button(
             "⬇️ Download CSV Backup",
@@ -588,4 +593,7 @@ if st.session_state.mode == "rep":
             mime="text/csv", use_container_width=True,
         )
 
-    # Auto-refresh is handled by st_autorefresh above — no sleep needed.
+    # ── Countdown tick: sleep 1s then rerun — drives the live progress bar ────
+    # Only sleep when no user action is pending so we never delay button clicks.
+    time.sleep(1)
+    st.rerun()

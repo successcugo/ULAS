@@ -381,7 +381,7 @@ if st.session_state.portal_role == "advisor":
             do_logout()
             st.rerun()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "🔧 My Account"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "🔧 My Account"])
 
     # ── TAB 1 — Course Reps ───────────────────────────────────────────────────
     with tab1:
@@ -569,8 +569,154 @@ if st.session_state.portal_role == "advisor":
         st.markdown(f"`SEETCSC301{current_abbr}300_2026-01-15.csv`")
         st.caption(f"Format: SCHOOL + COURSECODE + ABBR + LEVEL + _ + DATE .csv")
 
-    # ── TAB 4 — My Account ────────────────────────────────────────────────────
+    # ── TAB 4 — GPA Calculator ───────────────────────────────────────────────
     with tab4:
+        st.markdown("### 📊 GPA Calculator")
+        st.markdown(
+            "Enter each course with its unit load and grade. "
+            "GPA = Total Weighted Points ÷ Total Units."
+        )
+
+        # FUTO grade → point mapping
+        GRADE_POINTS = {"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0, "E": 1.0, "F": 0.0}
+
+        # Grading reference
+        with st.expander("📋 FUTO Grading Scale"):
+            st.markdown("""
+| Grade | Point |
+|-------|-------|
+| A | 5.0 |
+| B | 4.0 |
+| C | 3.0 |
+| D | 2.0 |
+| E | 1.0 |
+| F | 0.0 |
+""")
+
+        # Keep courses in session state so they persist across reruns
+        if "gpa_courses" not in st.session_state:
+            st.session_state.gpa_courses = [
+                {"code": "", "units": 1, "grade": "A"}
+            ]
+
+        st.markdown("#### Course Entries")
+
+        # Render each course row
+        to_delete = None
+        for i, course in enumerate(st.session_state.gpa_courses):
+            c1, c2, c3, c4 = st.columns([3, 1, 2, 1])
+            with c1:
+                st.session_state.gpa_courses[i]["code"] = st.text_input(
+                    "Course Code", value=course["code"],
+                    key=f"gpa_code_{i}", placeholder="e.g. CSC301",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                )
+            with c2:
+                st.session_state.gpa_courses[i]["units"] = st.number_input(
+                    "Units", min_value=1, max_value=6, step=1,
+                    value=course["units"], key=f"gpa_units_{i}",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                )
+            with c3:
+                st.session_state.gpa_courses[i]["grade"] = st.selectbox(
+                    "Grade", list(GRADE_POINTS.keys()),
+                    index=list(GRADE_POINTS.keys()).index(course["grade"]),
+                    key=f"gpa_grade_{i}",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                )
+            with c4:
+                st.markdown("<br>" if i == 0 else "", unsafe_allow_html=True)
+                if len(st.session_state.gpa_courses) > 1:
+                    if st.button("✕", key=f"gpa_del_{i}", help="Remove this course"):
+                        to_delete = i
+
+        if to_delete is not None:
+            st.session_state.gpa_courses.pop(to_delete)
+            st.rerun()
+
+        col_add, col_clear = st.columns([1, 1])
+        with col_add:
+            if st.button("➕ Add Course", use_container_width=True):
+                st.session_state.gpa_courses.append({"code": "", "units": 1, "grade": "A"})
+                st.rerun()
+        with col_clear:
+            if st.button("🗑️ Clear All", use_container_width=True):
+                st.session_state.gpa_courses = [{"code": "", "units": 1, "grade": "A"}]
+                st.rerun()
+
+        st.divider()
+
+        # ── Calculation ───────────────────────────────────────────────────────
+        courses = st.session_state.gpa_courses
+        valid   = [c for c in courses if str(c["code"]).strip()]
+
+        if not valid:
+            st.info("Add at least one course with a course code to calculate GPA.")
+        else:
+            total_units    = sum(c["units"] for c in valid)
+            total_weighted = sum(c["units"] * GRADE_POINTS[c["grade"]] for c in valid)
+            gpa            = total_weighted / total_units if total_units > 0 else 0.0
+
+            # Colour based on GPA range
+            if gpa >= 4.5:
+                gpa_colour, standing = "#27ae60", "First Class"
+            elif gpa >= 3.5:
+                gpa_colour, standing = "#2980b9", "Second Class Upper"
+            elif gpa >= 2.4:
+                gpa_colour, standing = "#f39c12", "Second Class Lower"
+            elif gpa >= 1.5:
+                gpa_colour, standing = "#e67e22", "Third Class"
+            else:
+                gpa_colour, standing = "#c0392b", "Pass / Fail"
+
+            st.markdown(f"""
+            <div style="
+                background: rgba(0,0,0,0.05);
+                border: 2px solid {gpa_colour};
+                border-radius: 14px;
+                padding: 1.5rem;
+                text-align: center;
+                margin: 1rem 0;
+                color: inherit;
+            ">
+                <div style="font-size:3rem;font-weight:900;color:{gpa_colour};line-height:1">
+                    {gpa:.2f}
+                </div>
+                <div style="font-size:1rem;font-weight:700;color:{gpa_colour};margin-top:0.3rem">
+                    {standing}
+                </div>
+                <div style="font-size:0.8rem;opacity:0.65;margin-top:0.5rem">
+                    {total_weighted:.1f} weighted points ÷ {total_units} units
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Breakdown table
+            st.markdown("#### Breakdown")
+            import pandas as pd
+            rows = []
+            for c in valid:
+                wp = c["units"] * GRADE_POINTS[c["grade"]]
+                rows.append({
+                    "Course Code":     c["code"].upper(),
+                    "Units":           c["units"],
+                    "Grade":           c["grade"],
+                    "Grade Point":     GRADE_POINTS[c["grade"]],
+                    "Weighted Points": f"{GRADE_POINTS[c['grade']]} × {c['units']} = {wp:.0f}",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            wp_parts = " + ".join(
+                str(int(c["units"] * GRADE_POINTS[c["grade"]])) for c in valid
+            )
+            st.markdown(
+                f"**Total Weighted Points** = {wp_parts} = **{total_weighted:.0f}**\n\n"
+                f"**Total Units** = {total_units}\n\n"
+                f"**GPA** = {total_weighted:.0f} ÷ {total_units} = **{gpa:.2f}**"
+            )
+
+    # ── TAB 5 — My Account ────────────────────────────────────────────────────
+    with tab5:
         st.markdown("### My Account")
         st.markdown(f"""<div class="info-card">
             <b>Username:</b> {adv['username']}<br>

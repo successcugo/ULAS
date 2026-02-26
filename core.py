@@ -21,8 +21,6 @@ from github_store import (
     read_json, write_json, delete_file, push_csv_to_lava,
 )
 from futo_data import get_school_abbr
-import streamlit as st
-
 # ── Timezone ──────────────────────────────────────────────────────────────────
 FUTO_TZ = timezone(timedelta(hours=1))
 
@@ -74,16 +72,17 @@ def save_settings(data: dict) -> bool:
 
 
 # ── ICT master authentication (credentials live in Streamlit secrets) ─────────
-def authenticate_ict(username: str, password: str) -> bool:
+def authenticate_ict(username: str, password: str,
+                      expected_user: str, expected_pw: str) -> bool:
     """
-    ICT master account. Credentials set in Streamlit secrets as:
-      ICT_USERNAME = "ict_admin"
-      ICT_PASSWORD = "your_password"
+    ICT master account. Pass in credentials from st.secrets in the calling app.
     Returns True if credentials match.
     """
-    expected_user = st.secrets.get("ICT_USERNAME", "ict")
-    expected_pw   = st.secrets.get("ICT_PASSWORD", "")
-    return username == expected_user and password == expected_pw and expected_pw != ""
+    return (
+        bool(expected_pw)
+        and username == expected_user
+        and password == expected_pw
+    )
 
 
 # ── Users (advisors + reps stored in ULASDATA) ───────────────────────────────

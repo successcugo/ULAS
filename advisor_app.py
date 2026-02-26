@@ -168,7 +168,11 @@ if st.session_state.portal_role is None:
             ict_p   = st.text_input("ICT Password", type="password")
             ict_btn = st.form_submit_button("Login as ICT", type="primary")
         if ict_btn:
-            if authenticate_ict(ict_u, ict_p):
+            if authenticate_ict(
+                ict_u, ict_p,
+                expected_user=st.secrets.get("ICT_USERNAME", ""),
+                expected_pw=st.secrets.get("ICT_PASSWORD", ""),
+            ):
                 st.session_state.portal_role = "ict"
                 st.rerun()
             else:

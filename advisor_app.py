@@ -21,7 +21,7 @@ from core import (
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
     get_all_advisors, load_settings, save_settings, hash_password,
-    verify_password, futo_now_str,
+    verify_password, futo_now_str, get_dept_abbreviation, set_dept_abbreviation,
 )
 from github_store import invalidate_cache
 
@@ -377,7 +377,7 @@ if st.session_state.portal_role == "advisor":
             do_logout()
             st.rerun()
 
-    tab1, tab2, tab3 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🔧 My Account"])
+    tab1, tab2, tab3, tab4 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "🔧 My Account"])
 
     # ── TAB 1 — Course Reps ───────────────────────────────────────────────────
     with tab1:
@@ -517,8 +517,56 @@ if st.session_state.portal_role == "advisor":
                 invalidate_cache("__users")
                 st.success("Password updated.")
 
-    # ── TAB 3 — My Account ────────────────────────────────────────────────────
+    # ── TAB 3 — Department Abbreviation ──────────────────────────────────────
     with tab3:
+        st.markdown(f"### Department Abbreviation — {department}")
+        st.markdown(
+            "Set a **3-letter abbreviation** for your department. "
+            "This is used in attendance file names pushed to LAVA, "
+            "e.g. `SEETCSC**EEE**300_2026-01-15.csv`."
+        )
+
+        current_abbr = get_dept_abbreviation(department)
+        st.markdown(f"""<div class="info-card">
+            <b>Current abbreviation:</b> &nbsp;
+            <span style="font-size:1.4rem;font-weight:900;letter-spacing:2px">{current_abbr}</span>
+            &nbsp;&nbsp;<span style="opacity:0.6;font-size:0.85rem">(used in all future file names)</span>
+        </div>""", unsafe_allow_html=True)
+
+        with st.form("abbr_form"):
+            new_abbr = st.text_input(
+                "New Abbreviation (3 letters)",
+                value=current_abbr,
+                max_chars=3,
+                placeholder="e.g. EEE",
+            )
+            abbr_btn = st.form_submit_button("💾 Save Abbreviation", type="primary")
+
+        if abbr_btn:
+            cleaned = new_abbr.strip().upper()
+            if not cleaned:
+                st.error("Abbreviation cannot be empty.")
+            elif not cleaned.isalpha():
+                st.error("Abbreviation must contain letters only.")
+            elif len(cleaned) != 3:
+                st.error(f"Abbreviation must be exactly 3 letters (you entered {len(cleaned)}).")
+            else:
+                ok = set_dept_abbreviation(department, cleaned)
+                if ok:
+                    invalidate_cache("__settings")
+                    st.success(f"✅ Abbreviation for **{department}** set to **{cleaned}**.")
+                    st.caption("All attendance files pushed from now on will use this abbreviation.")
+                else:
+                    st.error("Failed to save — GitHub write error.")
+
+        st.divider()
+        st.markdown("#### Example filename with this abbreviation")
+        example = f"SEET · CSC301 · {current_abbr} · Level 300 · 2026-01-15"
+        st.markdown(f"`SEETCSC301{current_abbr}300_2026-01-15.csv`")
+        st.caption(f"Format: SCHOOL + COURSECODE + ABBR + LEVEL + _ + DATE .csv")
+
+    # ── TAB 4 — My Account ────────────────────────────────────────────────────
+    with tab4:
         st.markdown("### My Account")
         st.markdown(f"""<div class="info-card">
             <b>Username:</b> {adv['username']}<br>

@@ -58,7 +58,10 @@ def verify_password(pw: str, hashed: str) -> bool:
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-DEFAULT_SETTINGS = {"TOKEN_LIFETIME": 7}
+DEFAULT_SETTINGS = {
+    "TOKEN_LIFETIME": 7,
+    "dept_abbreviations": {},   # {"Department Name": "ABC", ...}
+}
 
 def load_settings() -> dict:
     data, _ = cached_read_json("__settings", SETTINGS_PATH, default=DEFAULT_SETTINGS)
@@ -314,21 +317,43 @@ def session_to_csv(session: dict) -> str:
         })
     return output.getvalue()
 
+def get_dept_abbreviation(department: str) -> str:
+    """Return the advisor-set abbreviation for a department, or a fallback."""
+    settings = load_settings()
+    abbrevs  = settings.get("dept_abbreviations", {})
+    if department in abbrevs and abbrevs[department].strip():
+        return abbrevs[department].strip().upper()
+    # Fallback: first 3 letters of each word, max 3 chars total
+    words = department.replace("(", "").replace(")", "").split()
+    return "".join(w[0] for w in words)[:3].upper()
+
+def set_dept_abbreviation(department: str, abbreviation: str) -> bool:
+    """Save the abbreviation for a department to settings."""
+    settings = load_settings()
+    settings.setdefault("dept_abbreviations", {})
+    settings["dept_abbreviations"][department] = abbreviation.strip().upper()
+    return save_settings(settings)
+
 def build_csv_filename(session: dict) -> str:
-    dept_safe = session["department"].replace(" ", "").replace("/", "")[:18]
-    started   = datetime.fromisoformat(session["started_at"])
-    dt_str    = started.strftime("%Y-%m-%d_%H-%M")
-    return f"{session['course_code']}_{dept_safe}_{dt_str}.csv"
+    """New format: SCHOOL+COURSECODE+DEPTABBR+LEVEL+DATE.csv"""
+    school_abbr = get_school_abbr(session["school"])
+    dept_abbr   = get_dept_abbreviation(session["department"])
+    level       = session["level"]
+    started     = datetime.fromisoformat(session["started_at"])
+    date_str    = started.strftime("%Y-%m-%d")
+    course      = session["course_code"]
+    return f"{school_abbr}{course}{dept_abbr}{level}_{date_str}.csv"
 
 def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
-    school_abbr = get_school_abbr(session["school"])
-    dept_safe   = session["department"].replace(" ", "_").replace("/", "_")
-    filename    = build_csv_filename(session)
-    lava_path   = f"attendances/{school_abbr}/{dept_safe}/{filename}"
+    """Push CSV to attendances/(date)/filename.csv"""
+    started  = datetime.fromisoformat(session["started_at"])
+    date_str = started.strftime("%Y-%m-%d")
+    filename = build_csv_filename(session)
+    lava_path   = f"attendances/{date_str}/{filename}"
     csv_content = session_to_csv(session)
     commit_msg  = (
         f"Attendance: {session['course_code']} | "
         f"{session['department']} | Level {session['level']} | "
-        f"{session['started_at'][:10]}"
+        f"{date_str}"
     )
     return push_csv_to_lava(lava_path, csv_content, commit_msg)

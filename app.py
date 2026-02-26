@@ -471,16 +471,13 @@ if st.session_state.mode == "rep":
                     else:
                         st.error(msg)
 
-    # ── Entry table — fetch from GitHub every 5 ticks (~5s) not every tick ────
-    # This prevents GitHub latency from blocking the token display on every rerun.
-    if _tick % 5 == 0 or "rep_entries_loaded" not in st.session_state:
-        fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
-        if fresh_s:
-            st.session_state.rep_session      = fresh_s
-            st.session_state.rep_session_sha  = fresh_sha
-            st.session_state.rep_entries_loaded = True
-            session = fresh_s
-            sha     = fresh_sha
+    # ── Entry table — re-fetch from GitHub on every rerun to pick up student entries
+    fresh_s, fresh_sha = load_session(rep["school"], rep["department"], rep["level"])
+    if fresh_s:
+        st.session_state.rep_session      = fresh_s
+        st.session_state.rep_session_sha  = fresh_sha
+        session = fresh_s
+        sha     = fresh_sha
 
     st.markdown(f"#### Attendance List ({len(session['entries'])} entries)")
     if not session["entries"]:

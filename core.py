@@ -334,14 +334,17 @@ def set_dept_abbreviation(department: str, abbreviation: str) -> bool:
     return save_settings(settings)
 
 def build_csv_filename(session: dict) -> str:
-    """New format: SCHOOL+COURSECODE+DEPTABBR+LEVEL+DATE.csv"""
+    """Format: SCHOOL_ABBR+LEVEL_COURSECODE_DATE.csv
+    e.g. SEETEET300_CSC301_2026-02-26.csv
+    """
     school_abbr = get_school_abbr(session["school"])
     dept_abbr   = get_dept_abbreviation(session["department"])
     level       = session["level"]
     started     = datetime.fromisoformat(session["started_at"])
     date_str    = started.strftime("%Y-%m-%d")
     course      = session["course_code"]
-    return f"{school_abbr}{course}{dept_abbr}{level}_{date_str}.csv"
+    # Format: SCHOOL+ABBR+LEVEL _ COURSECODE _ DATE
+    return f"{school_abbr}{dept_abbr}{level}_{course}_{date_str}.csv"
 
 def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
     """Push CSV to attendances/(date)/filename.csv"""

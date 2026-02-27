@@ -99,8 +99,11 @@ def invalidate_structure_cache() -> None:
 def save_structure(structure: dict) -> bool:
     global _cache
     try:
-        from github_store import write_json
-        ok = write_json("data/structure.json", structure, "Update school/dept structure")
+        from github_store import read_json, write_json
+        # Always fetch the current SHA — GitHub requires it for updates
+        _, sha = read_json("data/structure.json")
+        ok = write_json("data/structure.json", structure,
+                        "Update school/dept structure", sha)
         if ok:
             _cache = structure
         return bool(ok)

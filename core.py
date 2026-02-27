@@ -20,7 +20,7 @@ from github_store import (
     cached_read_json, write_and_update_cache, invalidate_cache,
     read_json, write_json, delete_file, push_csv_to_lava,
 )
-from futo_data import get_school_abbr
+from futo_data import get_school_abbr, get_full_structure, save_structure, invalidate_structure_cache
 # ── Timezone ──────────────────────────────────────────────────────────────────
 FUTO_TZ = timezone(timedelta(hours=1))
 

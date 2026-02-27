@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from futo_data import get_schools, get_departments, get_levels
+from futo_data import get_schools, get_departments, get_levels, get_full_structure, save_structure, invalidate_structure_cache
 from core import (
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
@@ -207,8 +207,8 @@ if st.session_state.portal_role == "ict":
             do_logout()
             st.rerun()
 
-    ict_tab1, ict_tab2, ict_tab3 = st.tabs(
-        ["👥 All Advisors", "➕ Create Advisor", "⚙️ Settings"]
+    ict_tab1, ict_tab2, ict_tab3, ict_tab4 = st.tabs(
+        ["👥 All Advisors", "➕ Create Advisor", "🏫 Schools & Depts", "⚙️ Settings"]
     )
 
     # ── ICT TAB 1 — View & manage all advisors ────────────────────────────────
@@ -326,8 +326,185 @@ if st.session_state.portal_role == "ict":
                 else:
                     st.error(msg)
 
-    # ── ICT TAB 3 — Settings ──────────────────────────────────────────────────
+    # ── ICT TAB 3 — Schools & Departments ───────────────────────────────────────
     with ict_tab3:
+        st.markdown("### 🏫 Schools & Departments")
+        st.caption(
+            "Changes take effect immediately across all ULAS apps. "
+            "Deleting a school or department does **not** remove existing user accounts or session data."
+        )
+
+        invalidate_structure_cache()
+        struct    = get_full_structure()
+        schools_d = struct.get("schools", {})
+        abbrevs   = struct.get("abbreviations", {})
+
+        def _save(s, a):
+            return save_structure({"schools": s, "abbreviations": a})
+
+        # ── Add School ────────────────────────────────────────────────────────
+        with st.expander("➕ Add New School", expanded=False):
+            with st.form("add_school_form"):
+                ns_name  = st.text_input("Full school name", placeholder="School of XYZ (SXYZ)")
+                ns_abbr  = st.text_input("School abbreviation", placeholder="SXYZ", max_chars=8)
+                ns_btn   = st.form_submit_button("Add School", type="primary")
+            if ns_btn:
+                if not ns_name.strip() or not ns_abbr.strip():
+                    st.error("Both name and abbreviation are required.")
+                elif ns_name.strip() in schools_d:
+                    st.error("A school with that name already exists.")
+                else:
+                    schools_d[ns_name.strip()] = {}
+                    abbrevs[ns_name.strip()]   = ns_abbr.strip().upper()
+                    if _save(schools_d, abbrevs):
+                        st.success(f"✅ School '{ns_name.strip()}' added.")
+                        st.rerun()
+                    else:
+                        st.error("GitHub write failed.")
+
+        st.divider()
+
+        # ── Per-school management ─────────────────────────────────────────────
+        if not schools_d:
+            st.info("No schools defined yet. Add one above.")
+        else:
+            sel_school = st.selectbox(
+                "Select school to manage",
+                sorted(schools_d.keys()),
+                key="ict_sel_school",
+            )
+            depts = schools_d.get(sel_school, {})
+            cur_abbr = abbrevs.get(sel_school, "")
+
+            sc1, sc2 = st.columns([3, 1])
+            with sc1:
+                st.markdown(f"""<div class="ict-card">
+                    <b>{sel_school}</b> &nbsp;·&nbsp;
+                    Abbreviation: <b>{cur_abbr}</b> &nbsp;·&nbsp;
+                    {len(depts)} department(s)
+                </div>""", unsafe_allow_html=True)
+            with sc2:
+                if st.button("🗑️ Delete School", key="del_school_btn"):
+                    st.session_state["confirm_del_school"] = sel_school
+
+            # Delete school confirm
+            if st.session_state.get("confirm_del_school") == sel_school:
+                st.warning(
+                    f"Delete **{sel_school}** and all its departments? "
+                    "Existing user accounts will still exist but their school will no longer appear in dropdowns."
+                )
+                cy, cn = st.columns(2)
+                with cy:
+                    if st.button("Yes, delete school", type="primary", key="yes_del_school"):
+                        del schools_d[sel_school]
+                        abbrevs.pop(sel_school, None)
+                        _save(schools_d, abbrevs)
+                        st.session_state.pop("confirm_del_school", None)
+                        st.rerun()
+                with cn:
+                    if st.button("Cancel", key="no_del_school"):
+                        st.session_state.pop("confirm_del_school", None)
+                        st.rerun()
+
+            # Edit school abbreviation inline
+            with st.expander("✏️ Edit School Abbreviation"):
+                with st.form("edit_abbr_form"):
+                    new_abbr = st.text_input("Abbreviation", value=cur_abbr, max_chars=8)
+                    ea_btn   = st.form_submit_button("Save Abbreviation", type="primary")
+                if ea_btn:
+                    if new_abbr.strip():
+                        abbrevs[sel_school] = new_abbr.strip().upper()
+                        if _save(schools_d, abbrevs):
+                            st.success(f"Abbreviation updated to {new_abbr.strip().upper()}.")
+                            st.rerun()
+                        else:
+                            st.error("GitHub write failed.")
+
+            st.markdown(f"#### Departments in {abbrevs.get(sel_school, sel_school)}")
+
+            # ── Add Department ────────────────────────────────────────────────
+            with st.expander("➕ Add Department to this School"):
+                with st.form("add_dept_form"):
+                    nd_name   = st.text_input("Department name", placeholder="e.g. Software Engineering")
+                    nd_levels = st.number_input("Number of levels", min_value=1, max_value=8, value=4, step=1)
+                    nd_btn    = st.form_submit_button("Add Department", type="primary")
+                if nd_btn:
+                    if not nd_name.strip():
+                        st.error("Department name cannot be empty.")
+                    elif nd_name.strip() in depts:
+                        st.error("That department already exists in this school.")
+                    else:
+                        schools_d[sel_school][nd_name.strip()] = int(nd_levels)
+                        if _save(schools_d, abbrevs):
+                            st.success(f"✅ Department '{nd_name.strip()}' added with {nd_levels} levels.")
+                            st.rerun()
+                        else:
+                            st.error("GitHub write failed.")
+
+            # ── List & manage existing departments ────────────────────────────
+            if not depts:
+                st.info("No departments in this school yet.")
+            else:
+                for dept_name, num_levels in sorted(depts.items()):
+                    dc1, dc2, dc3 = st.columns([5, 2, 1])
+                    safe_key = dept_name.replace(" ", "_").replace("(", "").replace(")", "")
+
+                    with dc1:
+                        st.markdown(f"""<div class="rep-card">
+                            <b>{dept_name}</b>
+                            &nbsp;·&nbsp;
+                            <span style="opacity:0.65">{num_levels} levels
+                            ({", ".join(str((i+1)*100) for i in range(int(num_levels)))})</span>
+                        </div>""", unsafe_allow_html=True)
+
+                    with dc2:
+                        # Inline level editor
+                        if st.button("✏️ Edit Levels", key=f"edit_lvl_{safe_key}"):
+                            st.session_state[f"editing_{safe_key}"] = True
+
+                    with dc3:
+                        if st.button("🗑️", key=f"del_dept_{safe_key}", help=f"Delete {dept_name}"):
+                            st.session_state[f"confirm_del_dept_{safe_key}"] = True
+
+                    # Delete department confirm
+                    if st.session_state.get(f"confirm_del_dept_{safe_key}"):
+                        st.warning(f"Delete department **{dept_name}**?")
+                        yy, nn = st.columns(2)
+                        with yy:
+                            if st.button("Yes, delete", type="primary", key=f"yes_del_dept_{safe_key}"):
+                                del schools_d[sel_school][dept_name]
+                                _save(schools_d, abbrevs)
+                                st.session_state.pop(f"confirm_del_dept_{safe_key}", None)
+                                st.rerun()
+                        with nn:
+                            if st.button("Cancel", key=f"no_del_dept_{safe_key}"):
+                                st.session_state.pop(f"confirm_del_dept_{safe_key}", None)
+                                st.rerun()
+
+                    # Level editor
+                    if st.session_state.get(f"editing_{safe_key}"):
+                        with st.form(f"edit_levels_form_{safe_key}"):
+                            new_levels = st.number_input(
+                                f"Number of levels for {dept_name}",
+                                min_value=1, max_value=8,
+                                value=int(num_levels), step=1,
+                            )
+                            sl_save = st.form_submit_button("💾 Save Levels", type="primary")
+                            sl_cancel = st.form_submit_button("Cancel")
+                        if sl_save:
+                            schools_d[sel_school][dept_name] = int(new_levels)
+                            if _save(schools_d, abbrevs):
+                                st.success(f"Levels updated to {new_levels}.")
+                                st.session_state.pop(f"editing_{safe_key}", None)
+                                st.rerun()
+                            else:
+                                st.error("GitHub write failed.")
+                        if sl_cancel:
+                            st.session_state.pop(f"editing_{safe_key}", None)
+                            st.rerun()
+
+    # ── ICT TAB 4 — Settings ──────────────────────────────────────────────────
+    with ict_tab4:
         st.markdown("### System Settings")
         settings = load_settings()
         with st.form("ict_settings"):

@@ -1159,19 +1159,28 @@ if st.session_state.portal_role == "advisor":
             key="stats_chart_view",
         )
 
-        CHART_LAYOUT = dict(
+        import hashlib as _hashlib
+
+        def _course_colour(code: str) -> str:
+            h   = int(_hashlib.md5(code.encode()).hexdigest()[:6], 16)
+            hue = h % 360
+            return f"hsl({hue}, 72%, 55%)"
+
+        def _chart_height(n_bars: int) -> int:
+            return max(260, min(420, 180 + n_bars * 36))
+
+        CHART_LAYOUT_BASE = dict(
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
             font_color="#e8e4dc",
-            coloraxis_showscale=False,
+            title_font_size=13,
+            showlegend=False,
+            margin=dict(t=44, b=36, l=8, r=8),
             yaxis=dict(tickformat="d", gridcolor="rgba(255,255,255,0.07)", dtick=1),
-            xaxis=dict(gridcolor="rgba(0,0,0,0)"),
-            title_font_size=14,
-            margin=dict(t=50, b=20, l=20, r=20),
+            xaxis=dict(gridcolor="rgba(0,0,0,0)", tickangle=-30, tickfont=dict(size=11)),
         )
 
         if chart_view == "By Course Code":
-            # One bar per course — height = times this student attended that course
             sc = (
                 student_rows.groupby("course_code")
                 .size()
@@ -1180,22 +1189,22 @@ if st.session_state.portal_role == "advisor":
             all_courses_df = _pd.DataFrame({"course_code": course_list})
             sc = all_courses_df.merge(sc, on="course_code", how="left").fillna(0)
             sc["times_attended"] = sc["times_attended"].astype(int)
+            sc["colour"] = sc["course_code"].apply(_course_colour)
 
             fig = _px.bar(
                 sc,
                 x="course_code", y="times_attended",
                 text="times_attended",
                 labels={"course_code": "Course Code", "times_attended": "Times Attended"},
-                title=f"{sel_name} ({sel_matric}) — Attendance by Course",
-                color="times_attended",
-                color_continuous_scale=[[0, "rgba(192,57,43,0.1)"], [1, "rgba(192,57,43,1)"]],
+                title=f"{sel_name} — Attendance by Course",
+                color="course_code",
+                color_discrete_map={row["course_code"]: row["colour"] for _, row in sc.iterrows()},
             )
-            fig.update_traces(textposition="outside", marker_line_width=0)
-            fig.update_layout(**CHART_LAYOUT)
+            fig.update_traces(textposition="outside", marker_line_width=0, textfont_size=12)
+            fig.update_layout(**CHART_LAYOUT_BASE, height=_chart_height(len(sc)))
             st.plotly_chart(fig, use_container_width=True)
 
         else:  # By Date
-            # One bar per date — height = number of classes this student attended on that date
             sd = (
                 student_rows.groupby("date")
                 .size()
@@ -1207,12 +1216,11 @@ if st.session_state.portal_role == "advisor":
                 x="date", y="classes_attended",
                 text="classes_attended",
                 labels={"date": "Date", "classes_attended": "Classes Attended"},
-                title=f"{sel_name} ({sel_matric}) — Attendance by Date",
-                color="classes_attended",
-                color_continuous_scale=[[0, "rgba(41,128,185,0.1)"], [1, "rgba(41,128,185,1)"]],
+                title=f"{sel_name} — Attendance by Date",
+                color_discrete_sequence=["rgba(41,128,185,0.85)"],
             )
-            fig.update_traces(textposition="outside", marker_line_width=0)
-            fig.update_layout(**CHART_LAYOUT)
+            fig.update_traces(textposition="outside", marker_line_width=0, textfont_size=12)
+            fig.update_layout(**CHART_LAYOUT_BASE, height=_chart_height(len(sd)))
             st.plotly_chart(fig, use_container_width=True)
 
         # Per-student breakdown table

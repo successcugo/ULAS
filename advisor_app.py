@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from futo_data import get_schools, get_departments, get_levels, get_full_structure, save_structure, invalidate_structure_cache
+from futo_data import get_schools, get_departments, get_levels, get_full_structure, save_structure, invalidate_structure_cache, get_school_abbr
 from core import (
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,

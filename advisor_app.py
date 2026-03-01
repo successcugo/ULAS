@@ -561,7 +561,7 @@ if st.session_state.portal_role == "advisor":
             do_logout()
             st.rerun()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "🔧 My Account"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "📈 Dept Stats", "🔧 My Account"])
 
     # ── TAB 1 — Course Reps ───────────────────────────────────────────────────
     with tab1:
@@ -895,8 +895,369 @@ if st.session_state.portal_role == "advisor":
                 f"**GPA** = {total_weighted:.0f} ÷ {total_units} = **{gpa:.2f}**"
             )
 
-    # ── TAB 5 — My Account ────────────────────────────────────────────────────
+    # ── TAB 5 — Department Statistics ────────────────────────────────────────
     with tab5:
+        import requests as _req
+        import pandas as _pd
+        from io import BytesIO as _BytesIO
+        from datetime import date as _date, timedelta as _td
+        import plotly.express as _px
+
+        st.markdown(f"### 📈 Department Statistics — {department}")
+        st.caption(
+            "Reads attendance archives from LAVA. "
+            "Identifies records by your department abbreviation + selected level."
+        )
+
+        # ── LAVA connection ───────────────────────────────────────────────────
+        try:
+            _lava_token = st.secrets["GITHUB_PAT"]
+            _lava_repo  = f"{st.secrets['LAVA_OWNER']}/{st.secrets['LAVA_REPO']}"
+            _lava_hdrs  = {
+                "Authorization": f"token {_lava_token}",
+                "Accept": "application/vnd.github.v3+json",
+            }
+        except Exception:
+            st.error("LAVA secrets not configured. Add LAVA_OWNER and LAVA_REPO to secrets.")
+            st.stop()
+
+        @st.cache_data(ttl=120, show_spinner=False)
+        def _gh_list_stats(path):
+            url = f"https://api.github.com/repos/{_lava_repo}/contents/{path}"
+            r   = _req.get(url, headers=_lava_hdrs, timeout=10)
+            if r.status_code != 200:
+                return []
+            d = r.json()
+            return d if isinstance(d, list) else []
+
+        @st.cache_data(ttl=300, show_spinner=False)
+        def _fetch_csv_stats(download_url):
+            return _req.get(download_url, headers=_lava_hdrs, timeout=10).content
+
+        # ── Filters ───────────────────────────────────────────────────────────
+        dept_abbr       = get_dept_abbreviation(department)
+        school_abbr_val = get_school_abbr(school)
+        levels          = get_levels(department, school)
+
+        fc1, fc2, fc3 = st.columns([1, 1, 1])
+        with fc1:
+            sel_level = st.selectbox("Level", levels, key="stats_level")
+        with fc2:
+            today     = _date.today()
+            date_from = st.date_input(
+                "From date",
+                value=today.replace(day=1),   # start of current month
+                key="stats_from",
+            )
+        with fc3:
+            date_to = st.date_input(
+                "To date",
+                value=today,
+                key="stats_to",
+            )
+
+        if date_from > date_to:
+            st.error("'From' date must be before 'To' date.")
+            st.stop()
+
+        file_prefix = f"{school_abbr_val}{dept_abbr}{sel_level}"
+
+        if st.button("🔍 Load Statistics", type="primary", key="stats_load"):
+            # Clear previous results when filters change
+            for k in ["stats_master", "stats_matched_files"]:
+                st.session_state.pop(k, None)
+            st.session_state["stats_loaded"]   = True
+            st.session_state["stats_prefix"]   = file_prefix
+            st.session_state["stats_date_from"] = str(date_from)
+            st.session_state["stats_date_to"]   = str(date_to)
+
+        if not st.session_state.get("stats_loaded"):
+            st.info("Set a level and date range above then click **Load Statistics**.")
+            st.stop()
+
+        # Generate all YYYY-MM-DD strings in the range
+        def _date_range_strs(d_from, d_to):
+            out, cur = [], d_from
+            while cur <= d_to:
+                out.append(str(cur))
+                cur += _td(days=1)
+            return out
+
+        # ── Collect matching CSVs ──────────────────────────────────────────────
+        if "stats_master" not in st.session_state:
+            with st.spinner("Scanning LAVA archives..."):
+                all_date_folders = {
+                    f["name"] for f in _gh_list_stats("attendances")
+                    if f.get("type") == "dir"
+                }
+
+            target_dates = [
+                d for d in _date_range_strs(date_from, date_to)
+                if d in all_date_folders
+            ]
+
+            if not target_dates:
+                st.warning(f"No attendance folders found between {date_from} and {date_to}.")
+                st.stop()
+
+            matched_files = []
+            progress = st.progress(0, text="Scanning folders...")
+            for i, folder in enumerate(sorted(target_dates)):
+                progress.progress((i + 1) / len(target_dates), text=f"Scanning {folder}…")
+                for f in _gh_list_stats(f"attendances/{folder}"):
+                    name = f.get("name", "")
+                    if name.endswith(".csv") and name.startswith(file_prefix + "_"):
+                        try:
+                            parts       = name.replace(".csv", "").split("_")
+                            course_code = parts[1]
+                            file_date   = parts[2]
+                        except IndexError:
+                            course_code = "UNKNOWN"
+                            file_date   = folder
+                        matched_files.append({
+                            "name":         name,
+                            "download_url": f["download_url"],
+                            "date":         file_date,
+                            "course_code":  course_code,
+                        })
+            progress.empty()
+
+            if not matched_files:
+                st.warning(
+                    f"No records found for **{file_prefix}** between "
+                    f"{date_from} and {date_to}. "
+                    f"(Looking for files starting with `{file_prefix}_`)"
+                )
+                st.stop()
+
+            # Load all CSVs into master DataFrame
+            all_rows = []
+            prog2 = st.progress(0, text="Loading records...")
+            for i, mf in enumerate(matched_files):
+                prog2.progress((i + 1) / len(matched_files), text=f"Loading {mf['name']}…")
+                try:
+                    raw = _fetch_csv_stats(mf["download_url"])
+                    df  = _pd.read_csv(_BytesIO(raw))
+                    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+                    # Matric number is the only identity field
+                    mat_col = next(
+                        (c for c in df.columns if "matric" in c),
+                        None
+                    )
+                    if mat_col is None:
+                        continue
+                    if mat_col != "matric_number":
+                        df = df.rename(columns={mat_col: "matric_number"})
+                    df["course_code"] = mf["course_code"]
+                    df["date"]        = mf["date"]
+                    all_rows.append(df)
+                except Exception:
+                    continue
+            prog2.empty()
+
+            if not all_rows:
+                st.error("Could not parse any attendance records. Check CSV column format.")
+                st.stop()
+
+            master = _pd.concat(all_rows, ignore_index=True)
+            master["matric_number"] = master["matric_number"].astype(str).str.strip()
+
+            # Build display name: surname + other_names if available, else matric
+            if "surname" in master.columns and "other_names" in master.columns:
+                master["full_name"] = (
+                    master["surname"].fillna("").str.strip().str.upper()
+                    + " "
+                    + master["other_names"].fillna("").str.strip().str.title()
+                ).str.strip()
+            else:
+                master["full_name"] = master["matric_number"]
+
+            st.session_state["stats_master"]        = master
+            st.session_state["stats_matched_files"] = matched_files
+
+        master        = st.session_state["stats_master"]
+        matched_files = st.session_state["stats_matched_files"]
+        course_list   = sorted(master["course_code"].unique())
+
+        # ── Info banner ────────────────────────────────────────────────────────
+        st.markdown(f"""<div class="info-card">
+            <b>Level:</b> {sel_level} &nbsp;|&nbsp;
+            <b>Dept:</b> {dept_abbr} &nbsp;|&nbsp;
+            <b>Period:</b> {date_from} → {date_to} &nbsp;|&nbsp;
+            <b>Records:</b> {len(matched_files)} files &nbsp;|&nbsp;
+            <b>Entries:</b> {len(master)}
+        </div>""", unsafe_allow_html=True)
+
+        # ── Overview stats ─────────────────────────────────────────────────────
+        st.markdown("### Overview")
+        ov1, ov2, ov3 = st.columns(3)
+        for col, num, lbl in [
+            (ov1, master["matric_number"].nunique(), "Unique Students"),
+            (ov2, master["course_code"].nunique(),   "Courses"),
+            (ov3, len(master),                       "Total Entries"),
+        ]:
+            col.markdown(
+                f'<div class="stat-box"><div class="num">{num}</div>'
+                f'<div class="lbl">{lbl}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Course summary table ───────────────────────────────────────────────
+        st.markdown("### Attendance per Course")
+        course_summary = (
+            master.groupby("course_code")
+            .agg(sessions=("date", "nunique"), total_entries=("matric_number", "count"))
+            .reset_index()
+            .rename(columns={
+                "course_code":   "Course Code",
+                "sessions":      "Sessions Held",
+                "total_entries": "Total Entries",
+            })
+            .sort_values("Course Code")
+        )
+        st.dataframe(course_summary, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Student drill-down ─────────────────────────────────────────────────
+        st.markdown("### 👤 Student Drill-Down")
+
+        name_map = (
+            master.dropna(subset=["matric_number"])
+            .drop_duplicates(subset=["matric_number"])
+            .set_index("matric_number")["full_name"]
+            .to_dict()
+        )
+
+        student_opts = {
+            f"{mat}  —  {name_map.get(mat, '')}": mat
+            for mat in sorted(name_map.keys())
+        }
+
+        sel_label  = st.selectbox("Select student", list(student_opts.keys()), key="stats_student")
+        sel_matric = student_opts[sel_label]
+        sel_name   = name_map.get(sel_matric, sel_matric)
+
+        student_rows     = master[master["matric_number"] == sel_matric]
+        total_attended   = len(student_rows)
+        courses_attended = student_rows["course_code"].nunique()
+
+        st.markdown(f"""<div class="info-card">
+            <b>{sel_name}</b> &nbsp;|&nbsp;
+            Matric: <b>{sel_matric}</b> &nbsp;|&nbsp;
+            Total entries: <b>{total_attended}</b> &nbsp;|&nbsp;
+            Courses attended: <b>{courses_attended}</b>
+        </div>""", unsafe_allow_html=True)
+
+        # ── Switchable chart ───────────────────────────────────────────────────
+        chart_view = st.radio(
+            "Chart view",
+            ["By Course Code", "By Date"],
+            horizontal=True,
+            key="stats_chart_view",
+        )
+
+        CHART_LAYOUT = dict(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#e8e4dc",
+            coloraxis_showscale=False,
+            yaxis=dict(tickformat="d", gridcolor="rgba(255,255,255,0.07)", dtick=1),
+            xaxis=dict(gridcolor="rgba(0,0,0,0)"),
+            title_font_size=14,
+            margin=dict(t=50, b=20, l=20, r=20),
+        )
+
+        if chart_view == "By Course Code":
+            # One bar per course — height = times this student attended that course
+            sc = (
+                student_rows.groupby("course_code")
+                .size()
+                .reset_index(name="times_attended")
+            )
+            all_courses_df = _pd.DataFrame({"course_code": course_list})
+            sc = all_courses_df.merge(sc, on="course_code", how="left").fillna(0)
+            sc["times_attended"] = sc["times_attended"].astype(int)
+
+            fig = _px.bar(
+                sc,
+                x="course_code", y="times_attended",
+                text="times_attended",
+                labels={"course_code": "Course Code", "times_attended": "Times Attended"},
+                title=f"{sel_name} ({sel_matric}) — Attendance by Course",
+                color="times_attended",
+                color_continuous_scale=[[0, "#c0392b22"], [1, "#c0392b"]],
+            )
+            fig.update_traces(textposition="outside", marker_line_width=0)
+            fig.update_layout(**CHART_LAYOUT)
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:  # By Date
+            # One bar per date — height = number of classes this student attended on that date
+            sd = (
+                student_rows.groupby("date")
+                .size()
+                .reset_index(name="classes_attended")
+                .sort_values("date")
+            )
+            fig = _px.bar(
+                sd,
+                x="date", y="classes_attended",
+                text="classes_attended",
+                labels={"date": "Date", "classes_attended": "Classes Attended"},
+                title=f"{sel_name} ({sel_matric}) — Attendance by Date",
+                color="classes_attended",
+                color_continuous_scale=[[0, "#2980b922"], [1, "#2980b9"]],
+            )
+            fig.update_traces(textposition="outside", marker_line_width=0)
+            fig.update_layout(**CHART_LAYOUT)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Per-student breakdown table
+        st.markdown("#### Attendance Log")
+        breakdown = (
+            student_rows[["course_code", "date"]]
+            .sort_values(["date", "course_code"])
+            .rename(columns={"course_code": "Course Code", "date": "Date"})
+            .reset_index(drop=True)
+        )
+        breakdown.index += 1
+        st.dataframe(breakdown, use_container_width=True)
+
+        # ── Full matrix ────────────────────────────────────────────────────────
+        st.divider()
+        st.markdown("### 📋 Full Attendance Matrix")
+        st.caption(
+            "Rows = students · Columns = course codes · "
+            "Values = times attended · Sorted by total descending."
+        )
+
+        pivot = (
+            master.groupby(["matric_number", "course_code"])
+            .size()
+            .unstack(fill_value=0)
+            .reset_index()
+        )
+        pivot.insert(1, "Name", pivot["matric_number"].map(name_map))
+        pivot = pivot.rename(columns={"matric_number": "Matric No."})
+        course_cols = [c for c in pivot.columns if c not in ("Matric No.", "Name")]
+        pivot["Total"] = pivot[course_cols].sum(axis=1)
+        pivot = pivot.sort_values("Total", ascending=False).reset_index(drop=True)
+        pivot.index += 1
+
+        st.dataframe(pivot, use_container_width=True)
+
+        st.download_button(
+            "📥 Download Matrix (CSV)",
+            pivot.to_csv(index=False).encode(),
+            file_name=f"stats_{dept_abbr}{sel_level}_{date_from}_to_{date_to}.csv",
+            mime="text/csv",
+        )
+
+    # ── TAB 6 — My Account ────────────────────────────────────────────────────
+    with tab6:
         st.markdown("### My Account")
         st.markdown(f"""<div class="info-card">
             <b>Username:</b> {adv['username']}<br>

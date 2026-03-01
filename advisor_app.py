@@ -1188,7 +1188,7 @@ if st.session_state.portal_role == "advisor":
                 labels={"course_code": "Course Code", "times_attended": "Times Attended"},
                 title=f"{sel_name} ({sel_matric}) — Attendance by Course",
                 color="times_attended",
-                color_continuous_scale=[[0, "#c0392b22"], [1, "#c0392b"]],
+                color_continuous_scale=[[0, "rgba(192,57,43,0.1)"], [1, "rgba(192,57,43,1)"]],
             )
             fig.update_traces(textposition="outside", marker_line_width=0)
             fig.update_layout(**CHART_LAYOUT)
@@ -1209,7 +1209,7 @@ if st.session_state.portal_role == "advisor":
                 labels={"date": "Date", "classes_attended": "Classes Attended"},
                 title=f"{sel_name} ({sel_matric}) — Attendance by Date",
                 color="classes_attended",
-                color_continuous_scale=[[0, "#2980b922"], [1, "#2980b9"]],
+                color_continuous_scale=[[0, "rgba(41,128,185,0.1)"], [1, "rgba(41,128,185,1)"]],
             )
             fig.update_traces(textposition="outside", marker_line_width=0)
             fig.update_layout(**CHART_LAYOUT)

@@ -1257,12 +1257,259 @@ if st.session_state.portal_role == "advisor":
 
         st.dataframe(pivot, use_container_width=True)
 
-        st.download_button(
-            "📥 Download Matrix (CSV)",
-            pivot.to_csv(index=False).encode(),
-            file_name=f"stats_{dept_abbr}{sel_level}_{date_from}_to_{date_to}.csv",
-            mime="text/csv",
+        st.markdown("#### Export Attendance Matrix")
+        base_name = f"stats_{dept_abbr}{sel_level}_{date_from}_to_{date_to}"
+        report_title = (
+            f"Attendance Statistics — {dept_abbr} Level {sel_level}\n"
+            f"Period: {date_from} to {date_to}  |  Dept: {department}"
         )
+
+        # ── Export helpers ────────────────────────────────────────────────────
+        def _stats_to_excel(df, title):
+            import io as _io
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+            wb  = Workbook()
+            ws  = wb.active
+            ws.title = "Attendance Matrix"
+
+            thin   = Side(style="thin", color="CCCCCC")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            # Title rows
+            ws.merge_cells(f"A1:{chr(64 + len(df.columns))}1")
+            ws["A1"] = title.replace("\n", " | ")
+            ws["A1"].font      = Font(name="Arial", bold=True, size=12)
+            ws["A1"].alignment = Alignment(horizontal="center")
+
+            # Header row 3
+            hdr_fill = PatternFill("solid", fgColor="7B0000")
+            for ci, col in enumerate(df.columns, 1):
+                c = ws.cell(row=3, column=ci, value=col)
+                c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+                c.fill      = hdr_fill
+                c.alignment = Alignment(horizontal="center")
+                c.border    = border
+
+            # Data
+            alt_fill = PatternFill("solid", fgColor="FDF2F2")
+            for ri, row in enumerate(df.itertuples(index=False), start=4):
+                for ci, val in enumerate(row, 1):
+                    c = ws.cell(row=ri, column=ci, value=val)
+                    c.font      = Font(name="Arial", size=10)
+                    c.alignment = Alignment(horizontal="center" if ci > 2 else "left")
+                    c.border    = border
+                    if ri % 2 == 0:
+                        c.fill = alt_fill
+
+            # Column widths
+            ws.column_dimensions["A"].width = 18
+            ws.column_dimensions["B"].width = 26
+            for ci in range(3, len(df.columns) + 1):
+                ws.column_dimensions[chr(64 + ci)].width = 12
+
+            buf = _io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+
+        def _stats_to_word(df, title, dept, level, d_from, d_to):
+            import io as _io
+            from docx import Document
+            from docx.shared import Pt, RGBColor, Cm
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+
+            def _shd(cell, hex_col):
+                tc   = cell._tc
+                tcPr = tc.get_or_add_tcPr()
+                shd  = OxmlElement("w:shd")
+                shd.set(qn("w:fill"),  hex_col)
+                shd.set(qn("w:color"), "auto")
+                shd.set(qn("w:val"),   "clear")
+                tcPr.append(shd)
+
+            doc = Document()
+            for sec in doc.sections:
+                sec.top_margin    = Cm(2)
+                sec.bottom_margin = Cm(2)
+                sec.left_margin   = Cm(2)
+                sec.right_margin  = Cm(2)
+
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r = p.add_run("FEDERAL UNIVERSITY OF TECHNOLOGY, OWERRI")
+            r.bold = True
+            r.font.size = Pt(13)
+            r.font.color.rgb = RGBColor(0x7B, 0x00, 0x00)
+
+            p2 = doc.add_paragraph()
+            p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r2 = p2.add_run(f"Attendance Statistics — {dept}  |  Level {level}  |  {d_from} to {d_to}")
+            r2.font.size = Pt(11)
+            r2.italic = True
+
+            doc.add_paragraph()
+
+            headers = list(df.columns)
+            table   = doc.add_table(rows=1, cols=len(headers))
+            table.style     = "Table Grid"
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+            for i, h in enumerate(headers):
+                cell = table.rows[0].cells[i]
+                cell.text = str(h)
+                run = cell.paragraphs[0].runs[0]
+                run.bold = True
+                run.font.size = Pt(9)
+                run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                _shd(cell, "7B0000")
+
+            for ri, row in enumerate(df.itertuples(index=False)):
+                cells = table.add_row().cells
+                for ci, val in enumerate(row):
+                    cells[ci].text = str(val)
+                    run = cells[ci].paragraphs[0].runs[0]
+                    run.font.size = Pt(9)
+                    cells[ci].paragraphs[0].alignment = (
+                        WD_ALIGN_PARAGRAPH.LEFT if ci < 2 else WD_ALIGN_PARAGRAPH.CENTER
+                    )
+                    if ri % 2 == 0:
+                        _shd(cells[ci], "FDF2F2")
+
+            doc.add_paragraph()
+            fp = doc.add_paragraph(f"Total students: {len(df)}")
+            fp.runs[0].bold = True
+            fp.runs[0].font.size = Pt(10)
+
+            buf = _io.BytesIO()
+            doc.save(buf)
+            return buf.getvalue()
+
+        def _stats_to_pdf(df, title, dept, level, d_from, d_to):
+            import io as _io
+            from reportlab.lib.pagesizes import A4, landscape
+            from reportlab.lib import colors
+            from reportlab.lib.units import cm
+            from reportlab.platypus import (
+                SimpleDocTemplate, Table, TableStyle,
+                Paragraph, Spacer,
+            )
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.enums import TA_CENTER
+
+            buf    = _io.BytesIO()
+            page   = landscape(A4) if len(df.columns) > 6 else A4
+            doc    = SimpleDocTemplate(buf, pagesize=page,
+                                       topMargin=1.5*cm, bottomMargin=1.5*cm,
+                                       leftMargin=1.5*cm, rightMargin=1.5*cm)
+            styles = getSampleStyleSheet()
+
+            FUTO_RED = colors.HexColor("#7B0000")
+
+            title_style = ParagraphStyle(
+                "title", parent=styles["Normal"],
+                fontSize=13, fontName="Helvetica-Bold",
+                textColor=FUTO_RED, alignment=TA_CENTER, spaceAfter=4,
+            )
+            sub_style = ParagraphStyle(
+                "sub", parent=styles["Normal"],
+                fontSize=9, alignment=TA_CENTER, spaceAfter=12,
+                textColor=colors.HexColor("#555555"),
+            )
+
+            story = [
+                Paragraph("FEDERAL UNIVERSITY OF TECHNOLOGY, OWERRI", title_style),
+                Paragraph(f"Attendance Statistics — {dept} | Level {level} | {d_from} to {d_to}", sub_style),
+            ]
+
+            # Build table data
+            headers = list(df.columns)
+            data    = [headers] + [list(row) for row in df.itertuples(index=False)]
+
+            col_count  = len(headers)
+            avail_w    = (page[0] - 3*cm)
+            name_w     = 4.5*cm
+            matric_w   = 3*cm
+            rest_w     = max(1.5*cm, (avail_w - name_w - matric_w) / max(1, col_count - 2))
+            col_widths  = [matric_w, name_w] + [rest_w] * (col_count - 2)
+
+            tbl = Table(data, colWidths=col_widths, repeatRows=1)
+            tbl.setStyle(TableStyle([
+                # Header
+                ("BACKGROUND",  (0, 0), (-1, 0), FUTO_RED),
+                ("TEXTCOLOR",   (0, 0), (-1, 0), colors.white),
+                ("FONTNAME",    (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE",    (0, 0), (-1, 0), 9),
+                ("ALIGN",       (0, 0), (-1, 0), "CENTER"),
+                # Data
+                ("FONTNAME",    (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE",    (0, 1), (-1, -1), 8),
+                ("ALIGN",       (2, 1), (-1, -1), "CENTER"),
+                ("ALIGN",       (0, 1), (1, -1),  "LEFT"),
+                # Alternating rows
+                *[("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FDF2F2"))
+                  for i in range(2, len(data), 2)],
+                # Grid
+                ("GRID",        (0, 0), (-1, -1), 0.4, colors.HexColor("#DDDDDD")),
+                ("ROWBACKGROUND", (0, 0), (-1, 0), FUTO_RED),
+            ]))
+            story.append(tbl)
+            story.append(Spacer(1, 0.4*cm))
+
+            from reportlab.platypus import Paragraph as _P
+            story.append(_P(f"Total students: {len(df)}", styles["Normal"]))
+
+            doc.build(story)
+            return buf.getvalue()
+
+        # ── Four download buttons ─────────────────────────────────────────────
+        ex1, ex2, ex3, ex4 = st.columns(4)
+
+        with ex1:
+            st.download_button(
+                "📄 CSV",
+                pivot.to_csv(index=False).encode(),
+                file_name=f"{base_name}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with ex2:
+            try:
+                st.download_button(
+                    "📊 Excel",
+                    _stats_to_excel(pivot, report_title),
+                    file_name=f"{base_name}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Excel: {e}")
+        with ex3:
+            try:
+                st.download_button(
+                    "📝 Word",
+                    _stats_to_word(pivot, report_title, department, sel_level, date_from, date_to),
+                    file_name=f"{base_name}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Word: {e}")
+        with ex4:
+            try:
+                st.download_button(
+                    "📑 PDF",
+                    _stats_to_pdf(pivot, report_title, department, sel_level, date_from, date_to),
+                    file_name=f"{base_name}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"PDF: {e}")
 
     # ── TAB 6 — My Account ────────────────────────────────────────────────────
     with tab6:

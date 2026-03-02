@@ -303,7 +303,7 @@ def session_to_csv(session: dict) -> str:
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=["S/N", "Surname", "Other Names", "Matric Number", "Time"],
+        fieldnames=["S/N", "Surname", "Other Names", "Matric Number", "Time", "Session Started"],
     )
     writer.writeheader()
     for e in session["entries"]:
@@ -313,6 +313,7 @@ def session_to_csv(session: dict) -> str:
             "Other Names":  e["other_names"],
             "Matric Number": e["matric"],
             "Time":         e["time"],
+            "Session Started": datetime.fromisoformat(session["started_at"]).strftime("%H:%M:%S"),
         })
     return output.getvalue()
 

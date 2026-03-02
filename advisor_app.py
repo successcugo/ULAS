@@ -1220,15 +1220,10 @@ if st.session_state.portal_role == "advisor":
             fig.update_layout(**CHART_LAYOUT_BASE, height=_chart_height(len(sd)))
             st.plotly_chart(fig, use_container_width=True)
 
-        # Per-student breakdown table
+        # Per-student breakdown table — show enriched log with time + status
         st.markdown("#### Attendance Log")
-        breakdown = (
-            student_rows[["course_code", "date"]]
-            .sort_values(["date", "course_code"])
-            .rename(columns={"course_code": "Course Code", "date": "Date"})
-            .reset_index(drop=True)
-        )
-        breakdown.index += 1
+        breakdown = stu_log.copy()
+        breakdown.index = range(1, len(breakdown) + 1)
         st.dataframe(breakdown, use_container_width=True)
 
         # ── Full matrix (overview, not exported) ─────────────────────────────
@@ -1272,19 +1267,56 @@ if st.session_state.portal_role == "advisor":
         ).fillna(0).astype(int)
         stu_export = stu_export[["Course Code", "Sessions Held", "Times Attended"]]
 
-        # Build the attendance log for export
+        # Build enriched per-student log with time + lateness
+        # Normalise time column names
+        _has_time    = "time" in master.columns
+        _has_started = "session_started" in master.columns
+
+        def _parse_hms(s):
+            """Return minutes-since-midnight or None."""
+            try:
+                parts = str(s).strip().split(":")
+                return int(parts[0]) * 60 + int(parts[1])
+            except Exception:
+                return None
+
+        log_cols_src  = ["course_code", "date"]
+        log_cols_disp = {"course_code": "Course Code", "date": "Date"}
+
+        if _has_time:
+            log_cols_src.append("time")
+            log_cols_disp["time"] = "Sign-in Time"
+        if _has_started:
+            log_cols_src.append("session_started")
+            log_cols_disp["session_started"] = "Class Started"
+
         stu_log = (
-            student_rows[["course_code", "date"]]
+            student_rows[log_cols_src]
             .sort_values(["date", "course_code"])
-            .rename(columns={"course_code": "Course Code", "date": "Date"})
+            .rename(columns=log_cols_disp)
             .reset_index(drop=True)
         )
 
+        # Compute lateness when both times available
+        if _has_time and _has_started:
+            def _late_status(row):
+                signin  = _parse_hms(row.get("Sign-in Time", ""))
+                started = _parse_hms(row.get("Class Started", ""))
+                if signin is None or started is None:
+                    return "—"
+                diff = signin - started
+                if diff <= 0:
+                    return "✅ On Time"
+                elif diff <= 15:
+                    return f"⚠️ Late ({diff}m)"
+                else:
+                    return f"🔴 Very Late ({diff}m)"
+            stu_log["Status"] = stu_log.apply(_late_status, axis=1)
+
         # ── Remark dialog via session state ───────────────────────────────────
-        if "export_remark" not in st.session_state:
-            st.session_state["export_remark"] = ""
-        if "export_fmt" not in st.session_state:
-            st.session_state["export_fmt"] = None
+        for k in ["export_remark", "export_fmt", "remark_saved"]:
+            if k not in st.session_state:
+                st.session_state[k] = "" if k == "export_remark" else (None if k == "export_fmt" else False)
 
         ex1, ex2, ex3 = st.columns(3)
         for col, label, fmt in [
@@ -1296,22 +1328,31 @@ if st.session_state.portal_role == "advisor":
                 if st.button(label, key=f"exp_btn_{fmt}", use_container_width=True):
                     st.session_state["export_fmt"]    = fmt
                     st.session_state["export_remark"] = ""
+                    st.session_state["remark_saved"]  = False
 
         if st.session_state["export_fmt"]:
             fmt = st.session_state["export_fmt"]
-            st.markdown(f"#### Remark for {sel_name}'s report")
-            remark = st.text_area(
-                "Advisor's remark to parents (optional)",
-                value=st.session_state["export_remark"],
-                placeholder="e.g. This student has shown consistent attendance. Please ensure continued support.",
-                key="remark_input",
-                height=100,
-            )
-            st.session_state["export_remark"] = remark
+            st.markdown(f"#### ✍️ Remark for {sel_name}'s report")
+            with st.form("remark_form"):
+                remark_input = st.text_area(
+                    "Advisor's remark to parents (optional)",
+                    value=st.session_state["export_remark"],
+                    placeholder="e.g. This student has shown consistent attendance. Please ensure continued support.",
+                    height=120,
+                )
+                save_remark = st.form_submit_button("💾 Save Remark & Generate Download", type="primary", use_container_width=True)
+            if save_remark:
+                st.session_state["export_remark"] = remark_input
+                st.session_state["remark_saved"]  = True
+            remark = st.session_state["export_remark"]
 
-            _safe_name = sel_name.replace(' ', '-').replace('/', '-')
-            base_name  = f"{dept_abbr}{sel_level}_{sel_matric}_{_safe_name}_attendance-record_({date_from}_to_{date_to})"
+            _safe_name  = sel_name.replace(' ', '-').replace('/', '-')
+            base_name   = f"{dept_abbr}{sel_level}_{sel_matric}_{_safe_name}_attendance-record_({date_from}_to_{date_to})"
             advisor_sig = adv.get("username", "Course Advisor")
+
+            if not st.session_state.get("remark_saved"):
+                st.info("Type your remark above (or leave blank) and tap **Save Remark & Generate Download**.")
+                st.stop()
 
             # ── Excel ─────────────────────────────────────────────────────────
             def _to_excel():
@@ -1366,20 +1407,8 @@ if st.session_state.portal_role == "advisor":
                         c.border = border
                         if ri % 2 == 0: c.fill = alt_fill
 
-                # Attendance log sheet
-                ws2 = wb.create_sheet("Attendance Log")
-                for ci, h in enumerate(stu_log.columns, 1):
-                    c = ws2.cell(1, ci, value=h)
-                    c.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-                    c.fill = hdr_fill; c.alignment = Alignment(horizontal="center"); c.border = border
-                for ri, row in enumerate(stu_log.itertuples(index=False), start=2):
-                    for ci, val in enumerate(row, 1):
-                        c = ws2.cell(ri, ci, value=val)
-                        c.font = Font(name="Arial", size=10)
-                        c.border = border
-
                 # Remark
-                remark_row = 10 + len(stu_export) + len(stu_log) + 6
+                remark_row = 10 + len(stu_export) + 4
                 ws.cell(remark_row, 1).value = "Advisor's Remark:"
                 ws.cell(remark_row, 1).font  = Font(name="Arial", bold=True, size=10)
                 ws.merge_cells(f"A{remark_row+1}:E{remark_row+3}")
@@ -1450,27 +1479,6 @@ if st.session_state.portal_role == "advisor":
                 for ri, row in enumerate(stu_export.itertuples(index=False)):
                     cells=tbl.add_row().cells
                     for ci, val in enumerate(row):
-                        cells[ci].text=str(val)
-                        cells[ci].paragraphs[0].runs[0].font.size=Pt(9)
-                        cells[ci].paragraphs[0].alignment=WD_ALIGN_PARAGRAPH.CENTER
-                        if ri%2==0: _shd(cells[ci],"FDF2F2")
-                doc.add_paragraph()
-
-                # Chart image
-                doc.add_paragraph()
-
-                # Attendance log
-                doc.add_paragraph().add_run("Full Attendance Log").bold=True
-                log_tbl=doc.add_table(rows=1,cols=len(stu_log.columns))
-                log_tbl.style="Table Grid"; log_tbl.alignment=WD_TABLE_ALIGNMENT.CENTER
-                for i,h in enumerate(stu_log.columns):
-                    cell=log_tbl.rows[0].cells[i]; cell.text=str(h)
-                    run=cell.paragraphs[0].runs[0]
-                    run.bold=True; run.font.size=Pt(9); run.font.color.rgb=RGBColor(255,255,255)
-                    cell.paragraphs[0].alignment=WD_ALIGN_PARAGRAPH.CENTER; _shd(cell,"7B0000")
-                for ri,row in enumerate(stu_log.itertuples(index=False)):
-                    cells=log_tbl.add_row().cells
-                    for ci,val in enumerate(row):
                         cells[ci].text=str(val)
                         cells[ci].paragraphs[0].runs[0].font.size=Pt(9)
                         cells[ci].paragraphs[0].alignment=WD_ALIGN_PARAGRAPH.CENTER
@@ -1564,22 +1572,6 @@ if st.session_state.portal_role == "advisor":
                     *[("BACKGROUND",(0,i),(-1,i), LTRED) for i in range(2,len(s_data),2)],
                 ]))
                 story += [s_tbl, Spacer(1, 0.4*cm)]
-
-                # Attendance log
-                story.append(Paragraph("Full Attendance Log", label_s))
-                l_headers = list(stu_log.columns)
-                l_data    = [l_headers] + [list(r) for r in stu_log.itertuples(index=False)]
-                l_tbl = Table(l_data, colWidths=[7*cm, 7*cm], repeatRows=1)
-                l_tbl.setStyle(TableStyle([
-                    ("BACKGROUND", (0,0),(-1,0), RED),
-                    ("TEXTCOLOR",  (0,0),(-1,0), colors.white),
-                    ("FONTNAME",   (0,0),(-1,0), "Helvetica-Bold"),
-                    ("FONTSIZE",   (0,0),(-1,-1), 9),
-                    ("ALIGN",      (0,0),(-1,-1), "CENTER"),
-                    ("GRID",       (0,0),(-1,-1), 0.4, colors.HexColor("#DDDDDD")),
-                    *[("BACKGROUND",(0,i),(-1,i), LTRED) for i in range(2,len(l_data),2)],
-                ]))
-                story += [l_tbl, Spacer(1, 0.5*cm)]
 
                 # Remark
                 story.append(Paragraph("Advisor's Remark:", label_s))

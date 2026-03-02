@@ -1148,6 +1148,68 @@ if st.session_state.portal_role == "advisor":
             Courses attended: <b>{courses_attended}</b>
         </div>""", unsafe_allow_html=True)
 
+        # Build the per-student attendance summary table for export
+        stu_export = (
+            student_rows.groupby("course_code")
+            .size()
+            .reset_index(name="Times Attended")
+            .rename(columns={"course_code": "Course Code"})
+        )
+        all_c_df = _pd.DataFrame({"Course Code": course_list})
+        stu_export = all_c_df.merge(stu_export, on="Course Code", how="left").fillna(0)
+        stu_export["Times Attended"] = stu_export["Times Attended"].astype(int)
+        stu_export["Sessions Held"]  = stu_export["Course Code"].map(
+            master.groupby("course_code")["date"].nunique()
+        ).fillna(0).astype(int)
+        stu_export = stu_export[["Course Code", "Sessions Held", "Times Attended"]]
+
+        # Build enriched per-student log with time + lateness
+        # Normalise time column names
+        _has_time    = "time" in master.columns
+        _has_started = "session_started" in master.columns
+
+        def _parse_hms(s):
+            """Return minutes-since-midnight or None."""
+            try:
+                parts = str(s).strip().split(":")
+                return int(parts[0]) * 60 + int(parts[1])
+            except Exception:
+                return None
+
+        log_cols_src  = ["course_code", "date"]
+        log_cols_disp = {"course_code": "Course Code", "date": "Date"}
+
+        if _has_time:
+            log_cols_src.append("time")
+            log_cols_disp["time"] = "Sign-in Time"
+        if _has_started:
+            log_cols_src.append("session_started")
+            log_cols_disp["session_started"] = "Class Started"
+
+        stu_log = (
+            student_rows[log_cols_src]
+            .sort_values(["date", "course_code"])
+            .rename(columns=log_cols_disp)
+            .reset_index(drop=True)
+        )
+
+        # Compute lateness when both times available
+        if _has_time and _has_started:
+            def _late_status(row):
+                signin  = _parse_hms(row.get("Sign-in Time", ""))
+                started = _parse_hms(row.get("Class Started", ""))
+                if signin is None or started is None:
+                    return "—"
+                diff = signin - started
+                if diff <= 0:
+                    return "✅ On Time"
+                elif diff <= 15:
+                    return f"⚠️ Late ({diff}m)"
+                else:
+                    return f"🔴 Very Late ({diff}m)"
+            stu_log["Status"] = stu_log.apply(_late_status, axis=1)
+
+
         # ── Switchable chart ───────────────────────────────────────────────────
         chart_view = st.radio(
             "Chart view",
@@ -1251,67 +1313,6 @@ if st.session_state.portal_role == "advisor":
             f"Downloads a report for **{sel_name}** ({sel_matric}) only — "
             "suitable for sending to parents/guardians."
         )
-
-        # Build the per-student attendance summary table for export
-        stu_export = (
-            student_rows.groupby("course_code")
-            .size()
-            .reset_index(name="Times Attended")
-            .rename(columns={"course_code": "Course Code"})
-        )
-        all_c_df = _pd.DataFrame({"Course Code": course_list})
-        stu_export = all_c_df.merge(stu_export, on="Course Code", how="left").fillna(0)
-        stu_export["Times Attended"] = stu_export["Times Attended"].astype(int)
-        stu_export["Sessions Held"]  = stu_export["Course Code"].map(
-            master.groupby("course_code")["date"].nunique()
-        ).fillna(0).astype(int)
-        stu_export = stu_export[["Course Code", "Sessions Held", "Times Attended"]]
-
-        # Build enriched per-student log with time + lateness
-        # Normalise time column names
-        _has_time    = "time" in master.columns
-        _has_started = "session_started" in master.columns
-
-        def _parse_hms(s):
-            """Return minutes-since-midnight or None."""
-            try:
-                parts = str(s).strip().split(":")
-                return int(parts[0]) * 60 + int(parts[1])
-            except Exception:
-                return None
-
-        log_cols_src  = ["course_code", "date"]
-        log_cols_disp = {"course_code": "Course Code", "date": "Date"}
-
-        if _has_time:
-            log_cols_src.append("time")
-            log_cols_disp["time"] = "Sign-in Time"
-        if _has_started:
-            log_cols_src.append("session_started")
-            log_cols_disp["session_started"] = "Class Started"
-
-        stu_log = (
-            student_rows[log_cols_src]
-            .sort_values(["date", "course_code"])
-            .rename(columns=log_cols_disp)
-            .reset_index(drop=True)
-        )
-
-        # Compute lateness when both times available
-        if _has_time and _has_started:
-            def _late_status(row):
-                signin  = _parse_hms(row.get("Sign-in Time", ""))
-                started = _parse_hms(row.get("Class Started", ""))
-                if signin is None or started is None:
-                    return "—"
-                diff = signin - started
-                if diff <= 0:
-                    return "✅ On Time"
-                elif diff <= 15:
-                    return f"⚠️ Late ({diff}m)"
-                else:
-                    return f"🔴 Very Late ({diff}m)"
-            stu_log["Status"] = stu_log.apply(_late_status, axis=1)
 
         # ── Remark dialog via session state ───────────────────────────────────
         for k in ["export_remark", "export_fmt", "remark_saved"]:

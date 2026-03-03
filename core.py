@@ -347,6 +347,36 @@ def build_csv_filename(session: dict) -> str:
     # Format: SCHOOL+ABBR+LEVEL _ COURSECODE _ DATE
     return f"{school_abbr}{dept_abbr}{level}_{course}_{date_str}.csv"
 
+# ── Rep Session History ───────────────────────────────────────────────────────
+def _history_path(username: str) -> str:
+    return f"history/{username}.json"
+
+def append_session_history(session: dict) -> None:
+    """Append a completed session summary to the rep's history log."""
+    path = _history_path(session["rep_username"])
+    existing, sha = read_json(path)
+    records = existing if isinstance(existing, list) else []
+    records.append({
+        "course_code": session["course_code"],
+        "level":       session["level"],
+        "date":        datetime.fromisoformat(session["started_at"]).strftime("%Y-%m-%d"),
+        "started_at":  session["started_at"][11:16],
+        "entries":     len(session["entries"]),
+        "pushed_at":   futo_now().strftime("%Y-%m-%d %H:%M"),
+    })
+    # Keep last 50 sessions only
+    records = records[-50:]
+    write_json(path, records, f"History: {session['course_code']} pushed", sha)
+
+def load_session_history(username: str) -> list:
+    """Return the rep's session history list, newest first."""
+    path = _history_path(username)
+    data, _ = read_json(path)
+    if isinstance(data, list):
+        return list(reversed(data))
+    return []
+
+
 def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
     """Push CSV to attendances/(date)/filename.csv"""
     started  = datetime.fromisoformat(session["started_at"])
@@ -359,4 +389,10 @@ def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
         f"{session['department']} | Level {session['level']} | "
         f"{date_str}"
     )
-    return push_csv_to_lava(lava_path, csv_content, commit_msg)
+    ok, msg = push_csv_to_lava(lava_path, csv_content, commit_msg)
+    if ok:
+        try:
+            append_session_history(session)
+        except Exception:
+            pass  # history write failure must never block a push
+    return ok, msg

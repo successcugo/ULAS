@@ -10,11 +10,13 @@ import pandas as pd
 
 from futo_data import get_schools, get_departments, get_levels
 from core import (
+    load_session_history,
     authenticate_user, load_settings, save_session, load_session,
     start_session, refresh_token, token_remaining, validate_token,
     add_entry, edit_entry, delete_entry, validate_matric,
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
+    futo_now, futo_now_str,
 )
 
 st.set_page_config(
@@ -102,6 +104,8 @@ DEFAULTS = {
     "stu_session": None,
     "show_delete_confirm": None,
     "pending_end": False,
+    "show_end_summary": False,
+    "takeover_confirmed": False,
     # Cascading dropdown values
     "dd_school": None, "dd_dept": None, "dd_level": None,
 }
@@ -425,7 +429,46 @@ try:
         session = st.session_state.rep_session
         sha     = st.session_state.rep_session_sha
 
-        # ── No active session — start one ─────────────────────────────────────────
+        # ── Rep-to-Rep Handoff check ──────────────────────────────────────────
+        # If session was started by a different rep, show an explicit take-over card
+        if (session and
+                session.get("rep_username") != rep["username"] and
+                not st.session_state.get("takeover_confirmed")):
+            other = session.get("rep_username", "another rep")
+            st.markdown("### 🔄 Active Session — Different Rep")
+            st.markdown(f"""<div class="info-card">
+                A session for <b>Level {session['level']}L — {session['course_code']}</b>
+                was started by <b>{other}</b> at {session['started_at'][11:16]}.<br>
+                <span style="opacity:0.7">
+                    You can take over management of this session,
+                    or wait for {other} to end it.
+                </span>
+            </div>""", unsafe_allow_html=True)
+            tc1, tc2 = st.columns(2)
+            with tc1:
+                if st.button("🔄 Take Over Session", type="primary", use_container_width=True):
+                    # Record the takeover in the session JSON
+                    fs, fs_sha = load_session(rep["school"], rep["department"], rep["level"])
+                    if fs:
+                        fs["rep_username"] = rep["username"]
+                        fs.setdefault("takeover_log", []).append({
+                            "taken_by": rep["username"],
+                            "from":     other,
+                            "at":       futo_now_str(),
+                        })
+                        new_sha = save_session(rep["school"], rep["department"], rep["level"], fs, fs_sha)
+                        st.session_state.rep_session        = fs
+                        st.session_state.rep_session_sha    = new_sha
+                        st.session_state.takeover_confirmed = True
+                        st.success(f"✅ You have taken over the session from {other}.")
+                        st.rerun()
+            with tc2:
+                if st.button("👁️ View Only (no changes)", use_container_width=True):
+                    st.session_state.takeover_confirmed = True
+                    st.rerun()
+            st.stop()
+
+        # ── No active session — start one + show history ─────────────────────────
         if not session:
             st.markdown("### ▶ Start New Attendance")
             with st.form("start_att"):
@@ -440,10 +483,22 @@ try:
                             rep["school"], rep["department"], rep["level"],
                             course_code, rep["username"],
                         )
-                    # Store in session_state immediately — no re-fetch needed
                     st.session_state.rep_session     = session
                     st.session_state.rep_session_sha = sha
                     st.rerun()
+
+            # ── Session History ───────────────────────────────────────────────
+            st.divider()
+            st.markdown("### 📋 Your Session History")
+            with st.spinner("Loading history..."):
+                history = load_session_history(rep["username"])
+            if not history:
+                st.info("No past sessions yet. Your pushed attendances will appear here.")
+            else:
+                hist_df = pd.DataFrame(history)
+                hist_df.columns = [c.replace("_", " ").title() for c in hist_df.columns]
+                st.dataframe(hist_df, use_container_width=True, hide_index=True)
+                st.caption(f"Showing last {len(history)} session(s). Only successfully pushed sessions are recorded.")
             st.stop()
 
         # ── Refresh token if due, using in-memory session ─────────────────────────
@@ -577,13 +632,11 @@ try:
 
         # ── End attendance ────────────────────────────────────────────────────────
         st.markdown("### ⏹ End Attendance")
-        st.warning(f"Closes the session and pushes to **LAVA**. Currently **{len(session['entries'])} entries**.")
 
-        # Process a pending end-session (set on previous run when button was clicked).
-        # Doing the actual work here — on a fresh script run — ensures the 1-second
-        # countdown rerun cannot interrupt the GitHub API calls mid-flight.
+        # ── STEP: Execute pending push (set on previous run) ─────────────────────
         if st.session_state.pending_end:
-            st.session_state.pending_end = False
+            st.session_state.pending_end      = False
+            st.session_state.show_end_summary = False
             with st.spinner("Pushing to LAVA..."):
                 final, fsha = load_session(rep["school"], rep["department"], rep["level"])
                 if final:
@@ -593,6 +646,7 @@ try:
                         st.session_state.rep_session        = None
                         st.session_state.rep_session_sha    = None
                         st.session_state.rep_session_loaded = True
+                        st.session_state.takeover_confirmed = False
                         st.success("✅ Attendance pushed to LAVA successfully!")
                         st.balloons()
                         time.sleep(2)
@@ -604,11 +658,63 @@ try:
                     st.error("Session not found.")
             st.stop()
 
+        # ── STEP: Show summary before confirming push ─────────────────────────────
+        if st.session_state.show_end_summary:
+            entries     = session["entries"]
+            manual_flag = [e for e in entries if e.get("manual")]
+            times       = [e["time"] for e in entries if e.get("time")]
+            first_entry = min(times) if times else "—"
+            last_entry  = max(times) if times else "—"
+            duration_m  = ""
+            try:
+                from datetime import datetime as _dt
+                t0 = _dt.fromisoformat(session["started_at"])
+                t1 = futo_now()
+                mins = int((t1 - t0).total_seconds() // 60)
+                duration_m = f"{mins} min"
+            except Exception:
+                pass
+
+            st.markdown(f"""<div class="info-card">
+                <b>📋 Attendance Summary</b><br><br>
+                <b>Course Code:</b> {session['course_code']} &nbsp;·&nbsp;
+                <b>Level:</b> {session['level']}L<br>
+                <b>Started:</b> {session['started_at'][11:16]}
+                {f"&nbsp;·&nbsp; <b>Duration:</b> {duration_m}" if duration_m else ""}<br>
+                <b>Total Entries:</b> {len(entries)}<br>
+                <b>First Entry:</b> {first_entry} &nbsp;·&nbsp;
+                <b>Last Entry:</b> {last_entry}<br>
+                {f"<b>Manual Entries:</b> {len(manual_flag)} flagged" if manual_flag else
+                 "<span style='opacity:0.65'>No manual entries</span>"}
+            </div>""", unsafe_allow_html=True)
+
+            if not entries:
+                st.error("⚠️ No entries recorded. Are you sure you want to push an empty attendance?")
+
+            sc1, sc2, sc3 = st.columns(3)
+            with sc1:
+                if st.button("✅ Confirm & Push to LAVA", type="primary", use_container_width=True):
+                    st.session_state.pending_end = True
+                    st.rerun()
+            with sc2:
+                if st.button("✏️ Back to Editing", use_container_width=True):
+                    st.session_state.show_end_summary = False
+                    st.rerun()
+            with sc3:
+                st.download_button(
+                    "⬇️ CSV Backup",
+                    session_to_csv(session),
+                    file_name=build_csv_filename(session),
+                    mime="text/csv", use_container_width=True,
+                )
+            st.stop()
+
+        # ── STEP: Initial end button ──────────────────────────────────────────────
+        st.caption(f"Currently **{len(session['entries'])} entries** — review summary before pushing.")
         e1, e2 = st.columns(2)
         with e1:
-            if st.button("End & Push to LAVA", type="primary", use_container_width=True):
-                # Just set the flag and rerun — actual work happens at top of next run
-                st.session_state.pending_end = True
+            if st.button("⏹ End Attendance", type="primary", use_container_width=True):
+                st.session_state.show_end_summary = True
                 st.rerun()
         with e2:
             st.download_button(

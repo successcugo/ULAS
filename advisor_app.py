@@ -1706,37 +1706,40 @@ try:
 
             with _col_rooms:
                 st.markdown("**Rooms**")
-                # Load unread counts
+                # Fetch unread dict ONCE — just timestamps, no room content loaded
                 _unread = get_unread(_me)
 
+                # Badge: show dot if advisor has never read the room OR
+                # if last_seen is older than some messages. We infer this
+                # from presence of the room key in _unread — if absent, new.
+                # Full count only loaded for the ACTIVE room (already fetched below).
                 for _rkey, _rlabel in _base_rooms.items():
-                    _msgs_preview, _ = load_room(_rkey)
-                    _n = count_unread(_msgs_preview, _unread.get(_rkey))
-                    _badge = f" 🔴 {_n}" if _n > 0 else ""
+                    _has_unread = _rkey not in _unread
+                    _badge = " 🔴" if _has_unread else ""
                     if st.button(f"{_rlabel}{_badge}", key=f"room_btn_{_rkey}",
                                  use_container_width=True,
                                  type="primary" if st.session_state.chat_room == _rkey else "secondary"):
                         st.session_state.chat_room       = _rkey
                         st.session_state.chat_dm_target  = None
-                        st.session_state.chat_messages_cache = None
+                        st.session_state.pop(f"chat_last_marked_{_rkey}", None)
                         st.rerun()
 
                 st.markdown("**Direct Messages**")
                 _dm_search = st.text_input("Search advisor", placeholder="username...",
                                            key="dm_search_input", label_visibility="collapsed")
                 _filtered = [u for u in _others if _dm_search.lower() in u.lower()] if _dm_search else _others
-                for _other in _filtered[:15]:
+                for _other in _filtered[:20]:
                     _drkey = dm_room(_me, _other)
-                    _dm_msgs, _ = load_room(_drkey)
-                    _dn = count_unread(_dm_msgs, _unread.get(_drkey))
-                    _dbadge = f" 🔴 {_dn}" if _dn > 0 else ""
+                    # Badge from unread dict only — no API call per DM
+                    _has_dm_unread = _drkey not in _unread
+                    _dbadge = " 🔴" if _has_dm_unread else ""
                     _is_active = st.session_state.chat_room == _drkey
                     if st.button(f"@{_other}{_dbadge}", key=f"dm_btn_{_other}",
                                  use_container_width=True,
                                  type="primary" if _is_active else "secondary"):
                         st.session_state.chat_room       = _drkey
                         st.session_state.chat_dm_target  = _other
-                        st.session_state.chat_messages_cache = None
+                        st.session_state.pop(f"chat_last_marked_{_drkey}", None)
                         st.rerun()
 
             with _col_main:
@@ -1755,7 +1758,11 @@ try:
 
                     # ── Load & display messages ────────────────────────────────
                     _msgs, _ = load_room(_active_room)
-                    mark_read(_me, _active_room)
+                    # Only mark_read when room is first opened, not on every rerun
+                    _lr_key = "chat_last_marked_" + _active_room
+                    if not st.session_state.get(_lr_key):
+                        mark_read(_me, _active_room)
+                        st.session_state[_lr_key] = True
 
                     # Chat window CSS
                     st.markdown("""

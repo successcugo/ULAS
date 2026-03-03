@@ -594,58 +594,62 @@ try:
             invalidate_cache("__users")
             reps     = get_reps_for_dept(school, department)
             levels   = get_levels(department, school)
-            occupied = {r["level"] for r in reps}
 
             if reps:
-                for rep in sorted(reps, key=lambda r: r["level"]):
-                    rc, dc = st.columns([6, 1])
-                    with rc:
-                        st.markdown(f"""
-                        <div class="rep-card">
-                            <span class="badge-rep">Level {rep['level']}L</span>
-                            &nbsp;&nbsp;<b>{rep['username']}</b>
-                            &nbsp;·&nbsp;
-                            <span style="font-size:0.85rem;opacity:0.65">
-                                Created {rep.get('created_at','')[:10]}
-                                by {rep.get('created_by','—')}
-                            </span>
-                        </div>""", unsafe_allow_html=True)
-                    with dc:
-                        if st.button("🗑️", key=f"del_rep_{rep['username']}", help=f"Remove {rep['username']}"):
-                            delete_user(rep["username"])
-                            invalidate_cache("__users")
-                            st.success(f"Removed {rep['username']}")
-                            st.rerun()
+                # Group reps by level for display
+                from collections import defaultdict as _dd
+                reps_by_level = _dd(list)
+                for rep in reps:
+                    reps_by_level[rep["level"]].append(rep)
+
+                for lvl in sorted(reps_by_level.keys()):
+                    st.markdown(f"**Level {lvl}L**")
+                    for rep in reps_by_level[lvl]:
+                        rc, dc = st.columns([6, 1])
+                        with rc:
+                            st.markdown(f"""
+                            <div class="rep-card">
+                                <span class="badge-rep">Level {rep['level']}L</span>
+                                &nbsp;&nbsp;<b>{rep['username']}</b>
+                                &nbsp;·&nbsp;
+                                <span style="font-size:0.85rem;opacity:0.65">
+                                    Created {rep.get('created_at','')[:10]}
+                                    by {rep.get('created_by','—')}
+                                </span>
+                            </div>""", unsafe_allow_html=True)
+                        with dc:
+                            if st.button("🗑️", key=f"del_rep_{rep['username']}", help=f"Remove {rep['username']}"):
+                                delete_user(rep["username"])
+                                invalidate_cache("__users")
+                                st.success(f"Removed {rep['username']}")
+                                st.rerun()
             else:
                 st.info("No course reps assigned yet for this department.")
 
             st.divider()
-            available = [l for l in levels if l not in occupied]
-            if not available:
-                st.success(f"All {len(levels)} levels have a course rep assigned.")
-            else:
-                st.markdown("### ➕ Assign New Course Rep")
-                with st.form("assign_rep"):
-                    level = st.selectbox("Level", available)
-                    nu    = st.text_input("Username (must be unique across all of FUTO)")
-                    np    = st.text_input("Password", type="password")
-                    np2   = st.text_input("Confirm Password", type="password")
-                    a_btn = st.form_submit_button("Assign Rep", type="primary")
-                if a_btn:
-                    if not nu.strip() or not np.strip():
-                        st.error("All fields are required.")
-                    elif np != np2:
-                        st.error("Passwords do not match.")
-                    elif len(np) < 6:
-                        st.error("Password must be at least 6 characters.")
+            st.markdown("### ➕ Add Course Rep")
+            st.caption("Multiple reps can share a level — each gets their own login.")
+            with st.form("assign_rep"):
+                level = st.selectbox("Level", levels)
+                nu    = st.text_input("Username (must be unique across all of FUTO)")
+                np    = st.text_input("Password", type="password")
+                np2   = st.text_input("Confirm Password", type="password")
+                a_btn = st.form_submit_button("Add Rep", type="primary")
+            if a_btn:
+                if not nu.strip() or not np.strip():
+                    st.error("All fields are required.")
+                elif np != np2:
+                    st.error("Passwords do not match.")
+                elif len(np) < 6:
+                    st.error("Password must be at least 6 characters.")
+                else:
+                    ok, msg = create_user(nu.strip(), np, "rep", school, department, level, adv["username"])
+                    if ok:
+                        invalidate_cache("__users")
+                        st.success(f"✅ Rep '{nu}' added to Level {level}L!")
+                        st.rerun()
                     else:
-                        ok, msg = create_user(nu.strip(), np, "rep", school, department, level, adv["username"])
-                        if ok:
-                            invalidate_cache("__users")
-                            st.success(f"✅ Rep '{nu}' assigned to Level {level}L!")
-                            st.rerun()
-                        else:
-                            st.error(msg)
+                        st.error(msg)
 
         # ── TAB 2 — Passwords ─────────────────────────────────────────────────────
         with tab2:

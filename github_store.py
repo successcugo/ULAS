@@ -9,6 +9,7 @@ import json
 import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 import streamlit as st
 from typing import Any
 
@@ -124,15 +125,53 @@ def delete_file(path: str, message: str) -> bool:
 
 # ── CSV push to LAVA repo ─────────────────────────────────────────────────────
 
+def _get_default_branch(repo: str) -> str:
+    """Fetch the repo's actual default branch name ('main', 'master', etc.)."""
+    url = f"https://api.github.com/repos/{repo}"
+    req = urllib.request.Request(url, headers=_headers())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read()).get("default_branch", "main")
+    except Exception:
+        return "main"
+
+
 def push_csv_to_lava(lava_path: str, csv_content: str, message: str) -> tuple[bool, str]:
-    """Push a CSV file to the LAVA repo. Returns (success, message)."""
-    repo = _lava_repo()
+    """Push a CSV file to the LAVA repo on its default branch."""
+    repo   = _lava_repo()
+    branch = _get_default_branch(repo)
+
+    # Need existing SHA if file already exists
     existing = _gh_get(repo, lava_path)
-    sha = existing["sha"] if existing else None
-    ok = _gh_put(repo, lava_path, csv_content.encode(), message, sha)
-    if ok:
-        return True, f"Pushed to LAVA: {lava_path}"
-    return False, f"Failed to push to LAVA: {lava_path}"
+    sha      = existing["sha"] if existing else None
+
+    url     = f"https://api.github.com/repos/{repo}/contents/{lava_path}"
+    payload: dict[str, Any] = {
+        "message": message,
+        "content": base64.b64encode(csv_content.encode()).decode(),
+        "branch":  branch,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(url, data=data, headers=_headers(), method="PUT")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            if resp.status in (200, 201):
+                return True, f"Pushed to LAVA: {lava_path}"
+            return False, f"Unexpected status {resp.status}"
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        debug = (
+            f"**GitHub push failed**\n\n"
+            f"- Repo: `{repo}`\n"
+            f"- Branch: `{branch}`\n"
+            f"- Path: `{lava_path}`\n"
+            f"- HTTP status: `{e.code}`\n"
+            f"- Response: `{body[:500]}`"
+        )
+        return False, debug
 
 
 # ── Cached reads (st.session_state) ──────────────────────────────────────────
@@ -169,3 +208,84 @@ def write_and_update_cache(cache_key: str, path: str, data: dict | list, message
         st.session_state[sha_key] = new_sha
         return True
     return False
+
+
+# ── GitHub Releases file storage (for chat attachments) ──────────────────────
+
+def _ensure_chat_release() -> int | None:
+    """
+    Ensure a GitHub Release tagged 'ulas-chat-files' exists in ULASDATA.
+    Returns the release ID, or None on failure.
+    """
+    repo = _data_repo()
+    # Check if release already exists
+    url = f"https://api.github.com/repos/{repo}/releases/tags/ulas-chat-files"
+    req = urllib.request.Request(url, headers=_headers())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())["id"]
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return None
+    # Create release
+    url2    = f"https://api.github.com/repos/{repo}/releases"
+    payload = json.dumps({
+        "tag_name":   "ulas-chat-files",
+        "name":       "ULAS Chat File Storage",
+        "body":       "Automatically managed by ULAS. Do not delete.",
+        "draft":      False,
+        "prerelease": True,
+    }).encode()
+    req2 = urllib.request.Request(url2, data=payload, headers=_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req2) as resp:
+            return json.loads(resp.read())["id"]
+    except Exception:
+        return None
+
+
+def upload_chat_file(filename: str, file_bytes: bytes, mime: str) -> str | None:
+    """
+    Upload a file as a GitHub Release asset.
+    Returns the browser_download_url on success, None on failure.
+    filename should be unique (prefix with timestamp or uuid).
+    """
+    release_id = _ensure_chat_release()
+    if release_id is None:
+        return None
+
+    repo = _data_repo()
+    # Delete existing asset with same name if any (idempotent)
+    list_url = f"https://api.github.com/repos/{repo}/releases/{release_id}/assets"
+    list_req  = urllib.request.Request(list_url, headers=_headers())
+    try:
+        with urllib.request.urlopen(list_req) as resp:
+            assets = json.loads(resp.read())
+        for asset in assets:
+            if asset["name"] == filename:
+                del_url = f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}"
+                del_req = urllib.request.Request(del_url, headers=_headers(), method="DELETE")
+                try:
+                    urllib.request.urlopen(del_req)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    upload_url = (
+        f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets"
+        f"?name={urllib.parse.quote(filename)}"
+    )
+    up_headers = dict(_headers())
+    up_headers["Content-Type"]   = mime
+    up_headers["Content-Length"] = str(len(file_bytes))
+    up_req = urllib.request.Request(
+        upload_url, data=file_bytes, headers=up_headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(up_req) as resp:
+            result = json.loads(resp.read())
+            return result.get("browser_download_url")
+    except Exception:
+        return None
+

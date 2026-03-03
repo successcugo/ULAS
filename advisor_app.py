@@ -23,7 +23,13 @@ from core import (
     get_all_advisors, load_settings, save_settings, hash_password,
     verify_password, futo_now_str, get_dept_abbreviation, set_dept_abbreviation,
 )
-from github_store import invalidate_cache
+from github_store import invalidate_cache, upload_chat_file
+from chat_store import (
+    load_room, post_message, delete_message,
+    get_unread, mark_read, count_unread,
+    build_display_name, all_rooms_for_advisor,
+    dm_room, school_room,
+)
 
 st.set_page_config(
     page_title="ULAS Advisor Portal",
@@ -141,6 +147,12 @@ def _on_bs_dept():
     st.session_state.bs_dept = st.session_state._bs_dept_w
 
 
+
+# ── Chat session-state defaults ─────────────────────────────────────────────
+for _ck in ["chat_room", "chat_dm_target", "chat_poll_ts", "chat_messages_cache",
+            "chat_unread_cache", "chat_file_upload"]:
+    if _ck not in st.session_state:
+        st.session_state[_ck] = None
 
 # ── Branded error screen ─────────────────────────────────────────────────────
 def _show_error(exc: Exception):
@@ -586,7 +598,7 @@ try:
                 do_logout()
                 st.rerun()
 
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "📈 Dept Stats", "🔧 My Account"])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "📈 Dept Stats", "🔧 My Account", "💬 Chat"])
 
         # ── TAB 1 — Course Reps ───────────────────────────────────────────────────
         with tab1:
@@ -1671,6 +1683,177 @@ try:
                 "To create or delete advisor accounts, or to manage settings, "
                 "contact ICT administration."
             )
+
+        # ── TAB 7 — Chat ──────────────────────────────────────────────────────────
+        with tab7:
+            import time as _time
+            import math as _math
+
+            # Advisor identity for chat
+            _school_abbr = get_school_abbr(school) or school[:4].upper()
+            _dept_abbr   = get_dept_abbreviation(department) or department[:3].upper()
+            _display     = build_display_name(adv["username"], _school_abbr, _dept_abbr)
+            _me          = adv["username"]
+
+            # ── Room selector ──────────────────────────────────────────────────
+            _base_rooms  = all_rooms_for_advisor(_school_abbr)
+            # Build DM room list from all advisors
+            _all_advs    = get_all_advisors()
+            _others      = [a["username"] for a in _all_advs if a["username"] != _me]
+
+            st.markdown("### 💬 Advisor Chat")
+            _col_rooms, _col_main = st.columns([1, 3])
+
+            with _col_rooms:
+                st.markdown("**Rooms**")
+                # Load unread counts
+                _unread = get_unread(_me)
+
+                for _rkey, _rlabel in _base_rooms.items():
+                    _msgs_preview, _ = load_room(_rkey)
+                    _n = count_unread(_msgs_preview, _unread.get(_rkey))
+                    _badge = f" 🔴 {_n}" if _n > 0 else ""
+                    if st.button(f"{_rlabel}{_badge}", key=f"room_btn_{_rkey}",
+                                 use_container_width=True,
+                                 type="primary" if st.session_state.chat_room == _rkey else "secondary"):
+                        st.session_state.chat_room       = _rkey
+                        st.session_state.chat_dm_target  = None
+                        st.session_state.chat_messages_cache = None
+                        st.rerun()
+
+                st.markdown("**Direct Messages**")
+                _dm_search = st.text_input("Search advisor", placeholder="username...",
+                                           key="dm_search_input", label_visibility="collapsed")
+                _filtered = [u for u in _others if _dm_search.lower() in u.lower()] if _dm_search else _others
+                for _other in _filtered[:15]:
+                    _drkey = dm_room(_me, _other)
+                    _dm_msgs, _ = load_room(_drkey)
+                    _dn = count_unread(_dm_msgs, _unread.get(_drkey))
+                    _dbadge = f" 🔴 {_dn}" if _dn > 0 else ""
+                    _is_active = st.session_state.chat_room == _drkey
+                    if st.button(f"@{_other}{_dbadge}", key=f"dm_btn_{_other}",
+                                 use_container_width=True,
+                                 type="primary" if _is_active else "secondary"):
+                        st.session_state.chat_room       = _drkey
+                        st.session_state.chat_dm_target  = _other
+                        st.session_state.chat_messages_cache = None
+                        st.rerun()
+
+            with _col_main:
+                _active_room = st.session_state.chat_room
+
+                if not _active_room:
+                    st.info("👈 Select a room or advisor to start chatting.")
+                else:
+                    # Room header
+                    if _active_room == "global":
+                        st.markdown("#### 🌐 All FUTO — Global Chat")
+                    elif _active_room.startswith("school_"):
+                        st.markdown(f"#### 🏫 {_school_abbr} School Chat")
+                    else:
+                        st.markdown(f"#### 💬 DM — @{st.session_state.chat_dm_target}")
+
+                    # ── Load & display messages ────────────────────────────────
+                    _msgs, _ = load_room(_active_room)
+                    mark_read(_me, _active_room)
+
+                    # Chat window CSS
+                    st.markdown("""
+                    <style>
+                    .chat-bubble-me {
+                        background: rgba(26,86,219,0.15); border-radius: 12px 12px 2px 12px;
+                        padding: 0.5rem 0.8rem; margin: 0.3rem 0 0.3rem 15%;
+                        border-left: 3px solid #1a56db;
+                    }
+                    .chat-bubble-other {
+                        background: rgba(255,255,255,0.06); border-radius: 12px 12px 12px 2px;
+                        padding: 0.5rem 0.8rem; margin: 0.3rem 15% 0.3rem 0;
+                        border-left: 3px solid rgba(255,255,255,0.2);
+                    }
+                    .chat-meta { font-size:0.72rem; opacity:0.55; margin-bottom:2px; }
+                    .chat-text { font-size:0.92rem; word-break:break-word; }
+                    .chat-file { font-size:0.82rem; margin-top:4px; opacity:0.8; }
+                    </style>""", unsafe_allow_html=True)
+
+                    if not _msgs:
+                        st.caption("No messages yet. Say something!")
+                    else:
+                        # Show last 60 messages
+                        for _m in _msgs[-60:]:
+                            _is_me = _m["from"] == _me
+                            _cls   = "chat-bubble-me" if _is_me else "chat-bubble-other"
+                            _ts    = _m.get("ts","")[-8:-3]  # HH:MM
+                            _file_html = ""
+                            if _m.get("file"):
+                                _f = _m["file"]
+                                _sz = f" · {_f.get('size_kb','')}KB" if _f.get('size_kb') else ""
+                                _file_html = (
+                                    f'<div class="chat-file">📎 '
+                                    f'<a href="{_f["url"]}" target="_blank" '
+                                    f'style="color:#60a5fa;">{_f["name"]}</a>{_sz}</div>'
+                                )
+                            st.markdown(f"""
+                            <div class="{_cls}">
+                                <div class="chat-meta">{_m['display']} · {_ts}</div>
+                                <div class="chat-text">{_m.get('text','')}</div>
+                                {_file_html}
+                            </div>""", unsafe_allow_html=True)
+                            # Delete button for own messages
+                            if _is_me:
+                                if st.button("🗑", key=f"del_msg_{_m['id']}",
+                                             help="Delete this message"):
+                                    delete_message(_active_room, _m["id"], _me)
+                                    st.rerun()
+
+                    st.divider()
+
+                    # ── Message input ──────────────────────────────────────────
+                    with st.form("chat_send_form", clear_on_submit=True):
+                        _txt = st.text_area("Message", placeholder="Type a message...",
+                                            height=80, label_visibility="collapsed")
+                        _upl = st.file_uploader("Attach file (any type)",
+                                                label_visibility="collapsed")
+                        _fc1, _fc2 = st.columns([3, 1])
+                        with _fc1:
+                            _send = st.form_submit_button("📤 Send", type="primary",
+                                                          use_container_width=True)
+                        with _fc2:
+                            st.form_submit_button("🔄 Refresh", use_container_width=True)
+
+                    if _send:
+                        if not _txt.strip() and _upl is None:
+                            st.warning("Type a message or attach a file.")
+                        else:
+                            _file_info = None
+                            if _upl is not None:
+                                with st.spinner(f"Uploading {_upl.name}..."):
+                                    _fbytes   = _upl.read()
+                                    _size_kb  = _math.ceil(len(_fbytes) / 1024)
+                                    # Unique filename: ts_username_originalname
+                                    import re as _re
+                                    _safe_orig = _re.sub(r'[^\w.\-]', '_', _upl.name)
+                                    _fname = f"{futo_now_str()[:16].replace(':','-')}_{_me}_{_safe_orig}"
+                                    _url = upload_chat_file(_fname, _fbytes, _upl.type or "application/octet-stream")
+                                if _url:
+                                    _file_info = {
+                                        "name":    _upl.name,
+                                        "url":     _url,
+                                        "mime":    _upl.type or "application/octet-stream",
+                                        "size_kb": _size_kb,
+                                    }
+                                else:
+                                    st.error("File upload failed. Message not sent.")
+                                    st.stop()
+
+                            _ok = post_message(
+                                _active_room, _me, _display,
+                                _txt or "", _file_info
+                            )
+                            if _ok:
+                                st.rerun()
+                            else:
+                                st.error("Failed to send. Please try again.")
+
 
 except Exception as _err:
     if type(_err).__name__ in ("StopException", "RerunException"):

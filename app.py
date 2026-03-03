@@ -623,8 +623,8 @@ try:
         time.sleep(1)
         st.rerun()
 
-except st.exceptions.StopException:
-    raise
 except Exception as _err:
+    if type(_err).__name__ in ("StopException", "RerunException"):
+        raise
     _show_error(_err)
 

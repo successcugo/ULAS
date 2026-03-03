@@ -1,0 +1,16 @@
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = false
+toolbarMode = "minimal"
+
+[server]
+enableStaticServing = false
+
+[theme]
+base = "dark"
+primaryColor = "#c0392b"
+backgroundColor = "#1a1a1a"
+secondaryBackgroundColor = "#2a2a2a"
+textColor = "#e8e4dc"

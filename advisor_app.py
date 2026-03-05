@@ -20,6 +20,7 @@ from futo_data import get_schools, get_departments, get_levels, get_full_structu
 from core import (
     load_active_semester, start_semester, end_semester, load_semester_history,
     load_student_gpa, assign_semester_gpa, compute_cgpa, get_dept_matric_numbers,
+    lava_sem_path, get_available_sessions, get_semesters_for_session,
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
     get_all_advisors, load_settings, save_settings, hash_password,
@@ -1140,13 +1141,12 @@ try:
             import requests as _req
             import pandas as _pd
             from io import BytesIO as _BytesIO
-            from datetime import date as _date, timedelta as _td
             import plotly.express as _px
 
             st.markdown(f"### 📈 Department Statistics — {department}")
             st.caption(
                 "Reads attendance archives from LAVA. "
-                "Identifies records by your department abbreviation + selected level."
+                "Select level, session and semester to load records."
             )
 
             # ── LAVA connection ───────────────────────────────────────────────────
@@ -1179,94 +1179,121 @@ try:
             school_abbr_val = get_school_abbr(school)
             levels          = get_levels(department, school)
 
+            # Available sessions from semester history + active
+            _all_sessions = get_available_sessions()
+
+            if not _all_sessions:
+                st.info(
+                    "No semesters have been started yet. "
+                    "Ask ICT to start a semester before loading statistics."
+                )
+                st.stop()
+
             fc1, fc2, fc3 = st.columns([1, 1, 1])
             with fc1:
                 sel_level = st.selectbox("Level", levels, key="stats_level")
             with fc2:
-                today     = _date.today()
-                date_from = st.date_input(
-                    "From date",
-                    value=today.replace(day=1),   # start of current month
-                    key="stats_from",
+                sel_session = st.selectbox(
+                    "Academic Session",
+                    _all_sessions,
+                    key="stats_session",
+                    help="Sessions are created when ICT starts a semester.",
                 )
             with fc3:
-                date_to = st.date_input(
-                    "To date",
-                    value=today,
-                    key="stats_to",
+                sel_sem_choice = st.selectbox(
+                    "Semester",
+                    ["First Semester", "Second Semester", "Both Semesters"],
+                    key="stats_sem_choice",
                 )
-
-            if date_from > date_to:
-                st.error("'From' date must be before 'To' date.")
-                st.stop()
 
             file_prefix = f"{school_abbr_val}{dept_abbr}{sel_level}"
 
             if st.button("🔍 Load Statistics", type="primary", key="stats_load"):
-                # Clear previous results when filters change
                 for k in ["stats_master", "stats_matched_files"]:
                     st.session_state.pop(k, None)
-                st.session_state["stats_loaded"]   = True
-                st.session_state["stats_prefix"]   = file_prefix
-                st.session_state["stats_date_from"] = str(date_from)
-                st.session_state["stats_date_to"]   = str(date_to)
+                st.session_state["stats_loaded"]      = True
+                st.session_state["stats_prefix"]      = file_prefix
+                st.session_state["stats_session"]     = sel_session
+                st.session_state["stats_sem_choice"]  = sel_sem_choice
 
             if not st.session_state.get("stats_loaded"):
-                st.info("Set a level and date range above then click **Load Statistics**.")
+                st.info("Choose a level, session and semester then click **Load Statistics**.")
                 st.stop()
 
-            # Generate all YYYY-MM-DD strings in the range
-            def _date_range_strs(d_from, d_to):
-                out, cur = [], d_from
-                while cur <= d_to:
-                    out.append(str(cur))
-                    cur += _td(days=1)
-                return out
+            # ── Resolve which semester folders to scan ─────────────────────────────
+            _session_str = st.session_state["stats_session"]
+            _sem_choice  = st.session_state["stats_sem_choice"]
+            _sem_records = get_semesters_for_session(_session_str)
 
-            # ── Collect matching CSVs ──────────────────────────────────────────────
-            if "stats_master" not in st.session_state:
-                with st.spinner("Scanning LAVA archives..."):
-                    all_date_folders = {
-                        f["name"] for f in _gh_list_stats("attendances")
-                        if f.get("type") == "dir"
-                    }
+            # Map "First Semester" / "Second Semester" / "Both Semesters" to folder names
+            def _sem_folder(sem_rec: dict) -> str:
+                return sem_rec.get("name", "").replace(" ", "")
 
-                target_dates = [
-                    d for d in _date_range_strs(date_from, date_to)
-                    if d in all_date_folders
+            if _sem_choice == "Both Semesters":
+                _target_sems = _sem_records
+            else:
+                _target_sems = [
+                    s for s in _sem_records
+                    if s.get("name", "").lower().startswith(_sem_choice.split()[0].lower())
                 ]
 
-                if not target_dates:
-                    st.warning(f"No attendance folders found between {date_from} and {date_to}.")
-                    st.stop()
+            if not _target_sems:
+                st.warning(
+                    f"No semester records found for **{_session_str}** / **{_sem_choice}**. "
+                    "ICT may not have started that semester yet."
+                )
+                st.stop()
 
+            # ── Collect matching CSVs from LAVA ───────────────────────────────────
+            if "stats_master" not in st.session_state:
                 matched_files = []
-                progress = st.progress(0, text="Scanning folders...")
-                for i, folder in enumerate(sorted(target_dates)):
-                    progress.progress((i + 1) / len(target_dates), text=f"Scanning {folder}…")
-                    for f in _gh_list_stats(f"attendances/{folder}"):
-                        name = f.get("name", "")
-                        if name.endswith(".csv") and name.startswith(file_prefix + "_"):
-                            try:
-                                parts       = name.replace(".csv", "").split("_")
-                                course_code = parts[1]
-                                file_date   = parts[2]
-                            except IndexError:
-                                course_code = "UNKNOWN"
-                                file_date   = folder
-                            matched_files.append({
-                                "name":         name,
-                                "download_url": f["download_url"],
-                                "date":         file_date,
-                                "course_code":  course_code,
-                            })
-                progress.empty()
+                with st.spinner("Scanning LAVA archives..."):
+                    for _sem_rec in _target_sems:
+                        _sem_folder_name = _sem_folder(_sem_rec)
+                        _base_path = f"attendances/{_session_str}/{_sem_folder_name}"
+                        # List date sub-folders
+                        _date_folders = [
+                            f["name"] for f in _gh_list_stats(_base_path)
+                            if f.get("type") == "dir"
+                        ]
+                        progress = st.progress(0, text=f"Scanning {_sem_rec.get('name','')}...")
+                        for _di, _date_folder in enumerate(sorted(_date_folders)):
+                            progress.progress(
+                                (_di + 1) / max(len(_date_folders), 1),
+                                text=f"Scanning {_date_folder}..."
+                            )
+                            for f in _gh_list_stats(f"{_base_path}/{_date_folder}"):
+                                name = f.get("name", "")
+                                if not name.endswith(".csv"):
+                                    continue
+                                if not name.startswith(file_prefix + "_"):
+                                    continue
+                                # Parse: {ABBR}{LEVEL}_{SESSION}+{SEMESTER}_{COURSE}_{DATE}.csv
+                                try:
+                                    base   = name.replace(".csv", "")
+                                    parts  = base.split("_")
+                                    # parts[0] = ABBRLEVEL
+                                    # parts[1] = SESSION+SEMESTER
+                                    # parts[2] = COURSECODE
+                                    # parts[3] = DATE
+                                    course_code = parts[2]
+                                    file_date   = parts[3]
+                                except (IndexError, ValueError):
+                                    course_code = "UNKNOWN"
+                                    file_date   = _date_folder
+                                matched_files.append({
+                                    "name":         name,
+                                    "download_url": f.get("download_url", ""),
+                                    "date":         file_date,
+                                    "course_code":  course_code,
+                                    "semester":     _sem_rec.get("name", ""),
+                                })
+                        progress.empty()
 
                 if not matched_files:
                     st.warning(
-                        f"No records found for **{file_prefix}** between "
-                        f"{date_from} and {date_to}. "
-                        f"(Looking for files starting with `{file_prefix}_`)"
+                        f"No records found for **{file_prefix}** in "
+                        f"**{_session_str}** / **{_sem_choice}**."
                     )
                     st.stop()
 
@@ -1274,35 +1301,31 @@ try:
                 all_rows = []
                 prog2 = st.progress(0, text="Loading records...")
                 for i, mf in enumerate(matched_files):
-                    prog2.progress((i + 1) / len(matched_files), text=f"Loading {mf['name']}…")
+                    prog2.progress((i + 1) / len(matched_files), text=f"Loading {mf['name']}...")
                     try:
                         raw = _fetch_csv_stats(mf["download_url"])
                         df  = _pd.read_csv(_BytesIO(raw))
                         df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-                        # Matric number is the only identity field
-                        mat_col = next(
-                            (c for c in df.columns if "matric" in c),
-                            None
-                        )
+                        mat_col = next((c for c in df.columns if "matric" in c), None)
                         if mat_col is None:
                             continue
                         if mat_col != "matric_number":
                             df = df.rename(columns={mat_col: "matric_number"})
                         df["course_code"] = mf["course_code"]
                         df["date"]        = mf["date"]
+                        df["semester"]    = mf["semester"]
                         all_rows.append(df)
                     except Exception:
                         continue
                 prog2.empty()
 
                 if not all_rows:
-                    st.error("Could not parse any attendance records. Check CSV column format.")
+                    st.error("Could not parse any attendance records.")
                     st.stop()
 
                 master = _pd.concat(all_rows, ignore_index=True)
                 master["matric_number"] = master["matric_number"].astype(str).str.strip()
 
-                # Build display name: surname + other_names if available, else matric
                 if "surname" in master.columns and "other_names" in master.columns:
                     master["full_name"] = (
                         master["surname"].fillna("").str.strip().str.upper()
@@ -1322,8 +1345,8 @@ try:
             # ── Info banner ────────────────────────────────────────────────────────
             st.markdown(f"""<div class="info-card">
                 <b>Level:</b> {sel_level} &nbsp;|&nbsp;
-                <b>Dept:</b> {dept_abbr} &nbsp;|&nbsp;
-                <b>Period:</b> {date_from} → {date_to} &nbsp;|&nbsp;
+                <b>Session:</b> {_session_str} &nbsp;|&nbsp;
+                <b>Semester:</b> {_sem_choice} &nbsp;|&nbsp;
                 <b>Records:</b> {len(matched_files)} files &nbsp;|&nbsp;
                 <b>Entries:</b> {len(master)}
             </div>""", unsafe_allow_html=True)
@@ -1376,7 +1399,7 @@ try:
                 for mat in sorted(name_map.keys())
             }
 
-            sel_label  = st.selectbox("Select student", list(student_opts.keys()), key="stats_student")
+            sel_label  = st.selectbox("Select student", list(student_opts.keys()), key="stats_stu")
             sel_matric = student_opts[sel_label]
             sel_name   = name_map.get(sel_matric, sel_matric)
 
@@ -1391,14 +1414,14 @@ try:
                 Courses attended: <b>{courses_attended}</b>
             </div>""", unsafe_allow_html=True)
 
-            # Build the per-student attendance summary table for export
+            # Per-student attendance summary (for export)
             stu_export = (
                 student_rows.groupby("course_code")
                 .size()
                 .reset_index(name="Times Attended")
                 .rename(columns={"course_code": "Course Code"})
             )
-            all_c_df = _pd.DataFrame({"Course Code": course_list})
+            all_c_df   = _pd.DataFrame({"Course Code": course_list})
             stu_export = all_c_df.merge(stu_export, on="Course Code", how="left").fillna(0)
             stu_export["Times Attended"] = stu_export["Times Attended"].astype(int)
             stu_export["Sessions Held"]  = stu_export["Course Code"].map(
@@ -1406,21 +1429,19 @@ try:
             ).fillna(0).astype(int)
             stu_export = stu_export[["Course Code", "Sessions Held", "Times Attended"]]
 
-            # Build enriched per-student log with time + lateness
-            # Normalise time column names
+            # Time / lateness columns
             _has_time    = "time" in master.columns
             _has_started = "session_started" in master.columns
 
             def _parse_hms(s):
-                """Return minutes-since-midnight or None."""
                 try:
                     parts = str(s).strip().split(":")
                     return int(parts[0]) * 60 + int(parts[1])
                 except Exception:
                     return None
 
-            log_cols_src  = ["course_code", "date"]
-            log_cols_disp = {"course_code": "Course Code", "date": "Date"}
+            log_cols_src  = ["course_code", "date", "semester"]
+            log_cols_disp = {"course_code": "Course Code", "date": "Date", "semester": "Semester"}
 
             if _has_time:
                 log_cols_src.append("time")
@@ -1429,6 +1450,9 @@ try:
                 log_cols_src.append("session_started")
                 log_cols_disp["session_started"] = "Class Started"
 
+            # Only keep columns that actually exist
+            log_cols_src = [c for c in log_cols_src if c in student_rows.columns]
+
             stu_log = (
                 student_rows[log_cols_src]
                 .sort_values(["date", "course_code"])
@@ -1436,7 +1460,6 @@ try:
                 .reset_index(drop=True)
             )
 
-            # Compute lateness when both times available
             if _has_time and _has_started:
                 def _late_status(row):
                     signin  = _parse_hms(row.get("Sign-in Time", ""))
@@ -1452,8 +1475,23 @@ try:
                         return f"🔴 Very Late ({diff}m)"
                 stu_log["Status"] = stu_log.apply(_late_status, axis=1)
 
+            # ── Load GPA data for selected student ────────────────────────────────
+            _gpa_records = load_student_gpa(sel_matric)
+            _cgpa        = compute_cgpa(_gpa_records) if _gpa_records else None
 
-            # ── Switchable chart ───────────────────────────────────────────────────
+            # Filter GPA records to selected session / semester choice
+            def _gpa_matches(rec: dict) -> bool:
+                rec_session = rec.get("session", "").replace("/", "-")
+                rec_name    = rec.get("semester", "")
+                if rec_session != _session_str:
+                    return False
+                if _sem_choice == "Both Semesters":
+                    return True
+                return rec_name.lower().startswith(_sem_choice.split()[0].lower())
+
+            _period_gpa = [r for r in _gpa_records if _gpa_matches(r)]
+
+            # ── Charts ────────────────────────────────────────────────────────────
             chart_view = st.radio(
                 "Chart view",
                 ["By Course Code", "By Date"],
@@ -1492,21 +1530,17 @@ try:
                 sc = all_courses_df.merge(sc, on="course_code", how="left").fillna(0)
                 sc["times_attended"] = sc["times_attended"].astype(int)
                 sc["colour"] = sc["course_code"].apply(_course_colour)
-
                 fig = _px.bar(
-                    sc,
-                    x="course_code", y="times_attended",
-                    text="times_attended",
+                    sc, x="course_code", y="times_attended", text="times_attended",
                     labels={"course_code": "Course Code", "times_attended": "Times Attended"},
                     title=f"{sel_name} — Attendance by Course",
                     color="course_code",
                     color_discrete_map={row["course_code"]: row["colour"] for _, row in sc.iterrows()},
                 )
-                fig.update_traces(textposition="outside", marker_line_width=0, textfont_size=12)
+                fig.update_traces(textposition="outside", marker_line_width=0, textfont_size=11)
                 fig.update_layout(**CHART_LAYOUT_BASE, height=_chart_height(len(sc)))
                 st.plotly_chart(fig, use_container_width=True)
-
-            else:  # By Date
+            else:
                 sd = (
                     student_rows.groupby("date")
                     .size()
@@ -1514,27 +1548,24 @@ try:
                     .sort_values("date")
                 )
                 fig = _px.bar(
-                    sd,
-                    x="date", y="classes_attended",
-                    text="classes_attended",
+                    sd, x="date", y="classes_attended", text="classes_attended",
                     labels={"date": "Date", "classes_attended": "Classes Attended"},
                     title=f"{sel_name} — Attendance by Date",
                     color_discrete_sequence=["rgba(41,128,185,0.85)"],
                 )
-                fig.update_traces(textposition="outside", marker_line_width=0, textfont_size=12)
+                fig.update_traces(textposition="outside", marker_line_width=0, textfont_size=11)
                 fig.update_layout(**CHART_LAYOUT_BASE, height=_chart_height(len(sd)))
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Per-student breakdown table — show enriched log with time + status
             st.markdown("#### Attendance Log")
             breakdown = stu_log.copy()
             breakdown.index = range(1, len(breakdown) + 1)
             st.dataframe(breakdown, use_container_width=True)
 
-            # ── Full matrix (overview, not exported) ─────────────────────────────
+            # ── Full matrix ────────────────────────────────────────────────────────
             st.divider()
             st.markdown("### 📋 Full Attendance Matrix")
-            st.caption("Rows = students · Columns = course codes · Values = times attended · Sorted by total.")
+            st.caption("Rows = students · Columns = course codes · Values = times attended")
             pivot = (
                 master.groupby(["matric_number", "course_code"])
                 .size()
@@ -1549,15 +1580,14 @@ try:
             pivot.index += 1
             st.dataframe(pivot, use_container_width=True)
 
-            # ── Student report export ─────────────────────────────────────────────
+            # ── Student report export ──────────────────────────────────────────────
             st.divider()
             st.markdown("### 📤 Export Student Report")
             st.caption(
-                f"Downloads a report for **{sel_name}** ({sel_matric}) only — "
+                f"Downloads a report for **{sel_name}** ({sel_matric}) — "
                 "suitable for sending to parents/guardians."
             )
 
-            # ── Remark dialog via session state ───────────────────────────────────
             for k in ["export_remark", "export_fmt", "remark_saved"]:
                 if k not in st.session_state:
                     st.session_state[k] = "" if k == "export_remark" else (None if k == "export_fmt" else False)
@@ -1581,24 +1611,28 @@ try:
                     remark_input = st.text_area(
                         "Advisor's remark to parents (optional)",
                         value=st.session_state["export_remark"],
-                        placeholder="e.g. This student has shown consistent attendance. Please ensure continued support.",
+                        placeholder="e.g. This student has shown consistent attendance.",
                         height=120,
                     )
-                    save_remark = st.form_submit_button("💾 Save Remark & Generate Download", type="primary", use_container_width=True)
+                    save_remark = st.form_submit_button("💾 Save Remark & Generate Download")
                 if save_remark:
                     st.session_state["export_remark"] = remark_input
                     st.session_state["remark_saved"]  = True
                 remark = st.session_state["export_remark"]
 
                 _safe_name  = sel_name.replace(' ', '-').replace('/', '-')
-                base_name   = f"{dept_abbr}{sel_level}_{sel_matric}_{_safe_name}_attendance-record_({date_from}_to_{date_to})"
+                base_name   = f"{dept_abbr}{sel_level}_{sel_matric}_{_safe_name}_{_session_str}_{_sem_choice.replace(' ','')}_attendance"
                 advisor_sig = adv.get("username", "Course Advisor")
 
                 if not st.session_state.get("remark_saved"):
                     st.info("Type your remark above (or leave blank) and tap **Save Remark & Generate Download**.")
                     st.stop()
 
-                # ── Excel ─────────────────────────────────────────────────────────
+                # ── Shared GPA block builder ───────────────────────────────────────
+                # Used by all three export formats
+                _period_label = f"{_session_str} — {_sem_choice}"
+
+                # ── Excel ──────────────────────────────────────────────────────────
                 def _to_excel():
                     import io as _io
                     from openpyxl import Workbook
@@ -1610,8 +1644,10 @@ try:
                     thin   = Side(style="thin", color="CCCCCC")
                     border = Border(left=thin, right=thin, top=thin, bottom=thin)
                     RED    = "7B0000"
+                    hdr_fill = PatternFill("solid", fgColor=RED)
+                    alt_fill = PatternFill("solid", fgColor="FDF2F2")
 
-                    # Header block
+                    # Letterhead
                     ws.merge_cells("A1:E1")
                     ws["A1"] = "FEDERAL UNIVERSITY OF TECHNOLOGY, OWERRI"
                     ws["A1"].font      = Font(name="Arial", bold=True, size=13, color=RED)
@@ -1623,7 +1659,7 @@ try:
                     ws["A2"].alignment = Alignment(horizontal="center")
 
                     ws.merge_cells("A3:E3")
-                    ws["A3"] = f"Period: {date_from} to {date_to}"
+                    ws["A3"] = f"Session: {_session_str}   Semester: {_sem_choice}"
                     ws["A3"].font      = Font(name="Arial", size=10)
                     ws["A3"].alignment = Alignment(horizontal="center")
 
@@ -1635,9 +1671,7 @@ try:
                         ws.cell(row, 1).font = Font(name="Arial", bold=True, size=10)
                         ws.cell(row, 2).font = Font(name="Arial", size=10)
 
-                    # Summary table header row 9
-                    hdr_fill = PatternFill("solid", fgColor=RED)
-                    alt_fill = PatternFill("solid", fgColor="FDF2F2")
+                    # Attendance summary table — row 9
                     for ci, h in enumerate(stu_export.columns, 1):
                         c = ws.cell(9, ci, value=h)
                         c.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
@@ -1651,24 +1685,48 @@ try:
                             c.border = border
                             if ri % 2 == 0: c.fill = alt_fill
 
-                    # Remark
-                    remark_row = 10 + len(stu_export) + 4
-                    ws.cell(remark_row, 1).value = "Advisor's Remark:"
-                    ws.cell(remark_row, 1).font  = Font(name="Arial", bold=True, size=10)
-                    ws.merge_cells(f"A{remark_row+1}:E{remark_row+3}")
-                    ws.cell(remark_row+1, 1).value     = remark if remark.strip() else "—"
-                    ws.cell(remark_row+1, 1).font      = Font(name="Arial", size=10, italic=True)
-                    ws.cell(remark_row+1, 1).alignment = Alignment(wrap_text=True, vertical="top")
-                    ws.cell(remark_row+4, 1).value = f"Signed: {advisor_sig}   Date: {date_to}"
-                    ws.cell(remark_row+4, 1).font  = Font(name="Arial", size=9, italic=True)
+                    next_row = 10 + len(stu_export) + 2
 
-                    ws.column_dimensions["A"].width = 22
-                    ws.column_dimensions["B"].width = 18
+                    # GPA section
+                    if _gpa_records:
+                        ws.cell(next_row, 1).value = "GPA / CGPA Summary"
+                        ws.cell(next_row, 1).font  = Font(name="Arial", bold=True, size=11, color=RED)
+                        next_row += 1
+                        # Overall CGPA
+                        ws.cell(next_row, 1).value = "Overall CGPA (all semesters)"
+                        ws.cell(next_row, 1).font  = Font(name="Arial", bold=True, size=10)
+                        ws.cell(next_row, 2).value = f"{_cgpa:.2f}" if _cgpa is not None else "—"
+                        ws.cell(next_row, 2).font  = Font(name="Arial", size=10)
+                        next_row += 1
+                        # Period GPA rows
+                        if _period_gpa:
+                            for _gr in _period_gpa:
+                                ws.cell(next_row, 1).value = f"GPA — {_gr.get('semester','')}"
+                                ws.cell(next_row, 1).font  = Font(name="Arial", bold=True, size=10)
+                                ws.cell(next_row, 2).value = f"{_gr['gpa']:.2f}"
+                                ws.cell(next_row, 2).font  = Font(name="Arial", size=10)
+                                next_row += 1
+                    next_row += 1
+
+                    # Remark
+                    ws.cell(next_row, 1).value = "Advisor's Remark:"
+                    ws.cell(next_row, 1).font  = Font(name="Arial", bold=True, size=10)
+                    next_row += 1
+                    ws.merge_cells(f"A{next_row}:E{next_row+2}")
+                    ws.cell(next_row, 1).value     = remark if remark.strip() else "—"
+                    ws.cell(next_row, 1).font      = Font(name="Arial", size=10, italic=True)
+                    ws.cell(next_row, 1).alignment = Alignment(wrap_text=True, vertical="top")
+                    next_row += 3
+                    ws.cell(next_row, 1).value = f"Signed: {advisor_sig}   Date: {_period_label}"
+                    ws.cell(next_row, 1).font  = Font(name="Arial", size=9, italic=True)
+
+                    ws.column_dimensions["A"].width = 28
+                    ws.column_dimensions["B"].width = 20
                     ws.column_dimensions["C"].width = 16
 
                     buf = _io.BytesIO(); wb.save(buf); return buf.getvalue()
 
-                # ── Word ──────────────────────────────────────────────────────────
+                # ── Word ───────────────────────────────────────────────────────────
                 def _to_word():
                     import io as _io
                     from docx import Document
@@ -1677,6 +1735,7 @@ try:
                     from docx.enum.table import WD_TABLE_ALIGNMENT
                     from docx.oxml.ns import qn
                     from docx.oxml import OxmlElement
+
                     def _shd(cell, hx):
                         tc=cell._tc; p=tc.get_or_add_tcPr()
                         s=OxmlElement("w:shd")
@@ -1696,22 +1755,23 @@ try:
                     r2=p2.add_run(f"Student Attendance Report  ·  {department}  ·  Level {sel_level}")
                     r2.font.size=Pt(10); r2.italic=True
                     p3=doc.add_paragraph(); p3.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                    p3.add_run(f"Period: {date_from}  to  {date_to}").font.size=Pt(10)
+                    p3.add_run(f"Session: {_session_str}   ·   Semester: {_sem_choice}").font.size=Pt(10)
                     doc.add_paragraph()
 
                     # Student info box
-                    info_tbl = doc.add_table(rows=2, cols=4)
-                    info_tbl.style = "Table Grid"
-                    labels = ["Student Name", sel_name, "Matric No.", sel_matric]
-                    for i, val in enumerate(labels):
-                        cell = info_tbl.rows[0 if i < 2 else 1].cells[i % 2 * 2 + (0 if i % 2 == 0 else 1)]
-                        cell.text = val
-                        run = cell.paragraphs[0].runs[0]
-                        run.font.size = Pt(10)
-                        run.bold = (i % 2 == 0)
+                    info_tbl = doc.add_table(rows=2, cols=4); info_tbl.style = "Table Grid"
+                    labels = ["Student Name", sel_name, "Matric No.", sel_matric,
+                              "Total Entries", str(total_attended), "Courses", str(courses_attended)]
+                    for i in range(2):
+                        for j in range(4):
+                            cell = info_tbl.rows[i].cells[j]
+                            cell.text = labels[i*4+j]
+                            run = cell.paragraphs[0].runs[0]
+                            run.font.size = Pt(10)
+                            run.bold = (j % 2 == 0)
                     doc.add_paragraph()
 
-                    # Summary table
+                    # Attendance summary table
                     doc.add_paragraph().add_run("Attendance Summary").bold = True
                     tbl = doc.add_table(rows=1, cols=len(stu_export.columns))
                     tbl.style="Table Grid"; tbl.alignment=WD_TABLE_ALIGNMENT.CENTER
@@ -1729,20 +1789,43 @@ try:
                             if ri%2==0: _shd(cells[ci],"FDF2F2")
                     doc.add_paragraph()
 
+                    # GPA section
+                    if _gpa_records:
+                        gpa_head = doc.add_paragraph()
+                        gpa_head.add_run("GPA / CGPA Summary").bold = True
+                        gpa_head.runs[0].font.size = Pt(11)
+                        gpa_head.runs[0].font.color.rgb = RGBColor(0x7B,0,0)
+                        # CGPA row
+                        gpa_tbl = doc.add_table(rows=1, cols=2); gpa_tbl.style="Table Grid"
+                        _gh = gpa_tbl.rows[0].cells
+                        _gh[0].text = "Overall CGPA (all semesters)"
+                        _gh[0].paragraphs[0].runs[0].bold = True
+                        _gh[0].paragraphs[0].runs[0].font.size = Pt(10)
+                        _gh[1].text = f"{_cgpa:.2f}" if _cgpa is not None else "—"
+                        _gh[1].paragraphs[0].runs[0].font.size = Pt(10)
+                        _shd(_gh[0], "F5F5F5")
+                        for _gr in _period_gpa:
+                            cells2 = gpa_tbl.add_row().cells
+                            cells2[0].text = f"GPA — {_gr.get('semester','')}"
+                            cells2[0].paragraphs[0].runs[0].bold = True
+                            cells2[0].paragraphs[0].runs[0].font.size = Pt(10)
+                            cells2[1].text = f"{_gr['gpa']:.2f}"
+                            cells2[1].paragraphs[0].runs[0].font.size = Pt(10)
+                        doc.add_paragraph()
+
                     # Remark
                     doc.add_paragraph()
-                    rp=doc.add_paragraph()
-                    rp.add_run("Advisor's Remark:").bold=True
+                    rp=doc.add_paragraph(); rp.add_run("Advisor's Remark:").bold=True
                     rp.runs[0].font.size=Pt(10)
                     rb=doc.add_paragraph(remark if remark.strip() else "—")
                     rb.runs[0].font.size=Pt(10); rb.runs[0].italic=True
                     doc.add_paragraph()
-                    sig=doc.add_paragraph(f"Signed: {advisor_sig}          Date: {date_to}")
+                    sig=doc.add_paragraph(f"Signed: {advisor_sig}          Period: {_period_label}")
                     sig.runs[0].font.size=Pt(9); sig.runs[0].italic=True
 
                     buf=_io.BytesIO(); doc.save(buf); return buf.getvalue()
 
-                # ── PDF ───────────────────────────────────────────────────────────
+                # ── PDF ────────────────────────────────────────────────────────────
                 def _to_pdf():
                     import io as _io
                     from reportlab.lib.pagesizes import A4
@@ -1778,7 +1861,7 @@ try:
                     story = [
                         Paragraph("FEDERAL UNIVERSITY OF TECHNOLOGY, OWERRI", h1),
                         Paragraph(f"Student Attendance Report  ·  {department}  ·  Level {sel_level}", sub),
-                        Paragraph(f"Period: {date_from}  to  {date_to}", sub),
+                        Paragraph(f"Session: {_session_str}   ·   Semester: {_sem_choice}", sub),
                         Spacer(1, 0.3*cm),
                     ]
 
@@ -1796,11 +1879,10 @@ try:
                         ("GRID",       (0,0),(-1,-1), 0.4, colors.HexColor("#DDDDDD")),
                         ("BACKGROUND", (0,0),(0,-1),  colors.HexColor("#F5F5F5")),
                         ("BACKGROUND", (2,0),(2,-1),  colors.HexColor("#F5F5F5")),
-                        ("ROWBACKGROUND",(0,0),(-1,-1), colors.white),
                     ]))
                     story += [info_tbl, Spacer(1, 0.4*cm)]
 
-                    # Summary table
+                    # Attendance summary table
                     story.append(Paragraph("Attendance Summary", label_s))
                     s_headers = list(stu_export.columns)
                     s_data    = [s_headers] + [list(r) for r in stu_export.itertuples(index=False)]
@@ -1813,16 +1895,38 @@ try:
                         ("ALIGN",      (0,0),(-1,-1), "CENTER"),
                         ("ALIGN",      (0,1),(0,-1),  "LEFT"),
                         ("GRID",       (0,0),(-1,-1), 0.4, colors.HexColor("#DDDDDD")),
-                        *[("BACKGROUND",(0,i),(-1,i), LTRED) for i in range(2,len(s_data),2)],
+                        *[("BACKGROUND",(0,i),(-1,i), LTRED) for i in range(2, len(s_data), 2)],
                     ]))
                     story += [s_tbl, Spacer(1, 0.4*cm)]
+
+                    # GPA section
+                    if _gpa_records:
+                        story.append(Paragraph("GPA / CGPA Summary", label_s))
+                        gpa_data = [["Semester", "GPA"]]
+                        if _cgpa is not None:
+                            gpa_data.append(["Overall CGPA (all semesters)", f"{_cgpa:.2f}"])
+                        for _gr in _period_gpa:
+                            gpa_data.append([f"GPA — {_gr.get('semester','')}", f"{_gr['gpa']:.2f}"])
+                        g_tbl = Table(gpa_data, colWidths=[10*cm, 4*cm], repeatRows=1)
+                        g_tbl.setStyle(TableStyle([
+                            ("BACKGROUND", (0,0),(-1,0), RED),
+                            ("TEXTCOLOR",  (0,0),(-1,0), colors.white),
+                            ("FONTNAME",   (0,0),(-1,0), "Helvetica-Bold"),
+                            ("FONTNAME",   (0,1),(0,-1), "Helvetica-Bold"),
+                            ("FONTSIZE",   (0,0),(-1,-1), 9),
+                            ("ALIGN",      (0,0),(-1,-1), "LEFT"),
+                            ("ALIGN",      (1,0),(-1,-1), "CENTER"),
+                            ("GRID",       (0,0),(-1,-1), 0.4, colors.HexColor("#DDDDDD")),
+                            *[("BACKGROUND",(0,i),(-1,i), LTRED) for i in range(2, len(gpa_data), 2)],
+                        ]))
+                        story += [g_tbl, Spacer(1, 0.4*cm)]
 
                     # Remark
                     story.append(Paragraph("Advisor's Remark:", label_s))
                     story.append(Paragraph(remark if remark.strip() else "—", remark_s))
                     story.append(Spacer(1, 0.3*cm))
                     story.append(Paragraph(
-                        f"Signed: <b>{advisor_sig}</b>          Date: {date_to}",
+                        f"Signed: <b>{advisor_sig}</b>          Period: {_period_label}",
                         ParagraphStyle("sig", parent=styles["Normal"], fontSize=9,
                                        textColor=GREY, alignment=TA_LEFT)
                     ))
@@ -1830,7 +1934,7 @@ try:
                     doc.build(story)
                     return buf.getvalue()
 
-                # ── Render the correct download button ────────────────────────────
+                # ── Render download button ─────────────────────────────────────────
                 try:
                     if fmt == "xlsx":
                         data_bytes = _to_excel()
@@ -1853,6 +1957,7 @@ try:
                     )
                 except Exception as e:
                     st.error(f"Export failed: {e}")
+
 
         # ── TAB 6 — My Account ────────────────────────────────────────────────────
         with tab6:

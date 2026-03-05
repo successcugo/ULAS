@@ -335,17 +335,20 @@ def set_dept_abbreviation(department: str, abbreviation: str) -> bool:
     return save_settings(settings)
 
 def build_csv_filename(session: dict) -> str:
-    """Format: SCHOOL_ABBR+LEVEL_COURSECODE_DATE.csv
-    e.g. SEETEET300_CSC301_2026-02-26.csv
+    """Format: {SCHOOLABBR}{DEPTABBR}{LEVEL}_{SESSION}+{SEMESTER}_{COURSE}_{DATE}.csv
+    e.g. ESETCPE300_2025-2026+FirstSemester_CPE301_2026-02-26.csv
+    Session slashes replaced with hyphens; spaces stripped from semester name.
     """
-    school_abbr = get_school_abbr(session["school"])
-    dept_abbr   = get_dept_abbreviation(session["department"])
-    level       = session["level"]
-    started     = datetime.fromisoformat(session["started_at"])
-    date_str    = started.strftime("%Y-%m-%d")
-    course      = session["course_code"]
-    # Format: SCHOOL+ABBR+LEVEL _ COURSECODE _ DATE
-    return f"{school_abbr}{dept_abbr}{level}_{course}_{date_str}.csv"
+    school_abbr  = get_school_abbr(session["school"])
+    dept_abbr    = get_dept_abbreviation(session["department"])
+    level        = session["level"]
+    started      = datetime.fromisoformat(session["started_at"])
+    date_str     = started.strftime("%Y-%m-%d")
+    course       = session["course_code"]
+    sem          = load_active_semester() or {}
+    sem_session  = sem.get("session", "UnknownSession").replace("/", "-")
+    sem_name     = sem.get("name", "UnknownSemester").replace(" ", "")
+    return f"{school_abbr}{dept_abbr}{level}_{sem_session}+{sem_name}_{course}_{date_str}.csv"
 
 # ── Rep Session History ───────────────────────────────────────────────────────
 def _history_path(username: str) -> str:
@@ -378,23 +381,28 @@ def load_session_history(username: str) -> list:
 
 
 def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
-    """Push CSV to attendances/(date)/filename.csv"""
+    """Push CSV to attendances/{session}/{semester}/{date}/filename.csv"""
+    sem      = load_active_semester() or {}
     started  = datetime.fromisoformat(session["started_at"])
     date_str = started.strftime("%Y-%m-%d")
     filename = build_csv_filename(session)
-    lava_path   = f"attendances/{date_str}/{filename}"
-    csv_content = session_to_csv(session)
-    commit_msg  = (
+
+    # Safe path segments — no slashes or spaces
+    sem_session  = sem.get("session", "UnknownSession").replace("/", "-")
+    sem_name     = sem.get("name",    "UnknownSemester").replace(" ", "")
+    lava_path    = f"attendances/{sem_session}/{sem_name}/{date_str}/{filename}"
+    csv_content  = session_to_csv(session)
+    commit_msg   = (
         f"Attendance: {session['course_code']} | "
         f"{session['department']} | Level {session['level']} | "
-        f"{date_str}"
+        f"{sem_session} {sem_name} | {date_str}"
     )
     ok, msg = push_csv_to_lava(lava_path, csv_content, commit_msg)
     if ok:
         try:
             append_session_history(session)
         except Exception:
-            pass  # history write failure must never block a push
+            pass
     return ok, msg
 
 
@@ -430,6 +438,14 @@ def start_semester(name: str, session: str, started_by: str) -> tuple[bool, str]
     if not new_sha:
         return False, "GitHub write failed."
     invalidate_cache("__active_semester")
+    # Create LAVA directory scaffold so the folder exists immediately
+    sem_session = session.replace("/", "-")
+    sem_name    = name.strip().replace(" ", "")
+    lava_keep   = f"attendances/{sem_session}/{sem_name}/.gitkeep"
+    try:
+        push_csv_to_lava(lava_keep, "", f"Init: {sem['label']}")
+    except Exception:
+        pass  # non-fatal — attendance push will create path anyway
     return True, f"Semester started: {sem['label']}"
 
 def end_semester(ended_by: str) -> tuple[bool, str]:
@@ -455,6 +471,41 @@ def end_semester(ended_by: str) -> tuple[bool, str]:
 def load_semester_history() -> list:
     data, _ = read_json(SEMESTER_HISTORY_PATH)
     return list(reversed(data)) if isinstance(data, list) else []
+
+
+# ── LAVA path helpers ────────────────────────────────────────────────────────
+def lava_sem_path(sem_record: dict) -> str:
+    """Return the LAVA path prefix for a given semester record."""
+    sem_session = sem_record.get("session", "").replace("/", "-")
+    sem_name    = sem_record.get("name",    "").replace(" ", "")
+    return f"attendances/{sem_session}/{sem_name}"
+
+def get_available_sessions() -> list[str]:
+    """
+    Return sorted list of unique academic sessions from semester history + active.
+    e.g. ['2024-2025', '2025-2026']
+    """
+    sems = load_semester_history()
+    active = load_active_semester()
+    if active:
+        sems = [active] + sems
+    seen = []
+    for s in sems:
+        v = s.get("session", "").replace("/", "-")
+        if v and v not in seen:
+            seen.append(v)
+    return sorted(seen)
+
+def get_semesters_for_session(session_str: str) -> list[dict]:
+    """
+    Return semester records (active + history) that belong to a given session.
+    session_str is already slash-free e.g. '2025-2026'.
+    """
+    sems = load_semester_history()
+    active = load_active_semester()
+    if active:
+        sems = [active] + sems
+    return [s for s in sems if s.get("session", "").replace("/", "-") == session_str]
 
 
 # ── GPA / CGPA ────────────────────────────────────────────────────────────────

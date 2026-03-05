@@ -1162,17 +1162,21 @@ try:
                 st.stop()
 
             @st.cache_data(ttl=120, show_spinner=False)
-            def _gh_list_stats(path):
-                url = f"https://api.github.com/repos/{_lava_repo}/contents/{path}"
-                r   = _req.get(url, headers=_lava_hdrs, timeout=10)
+            def _gh_list_stats(path, _repo, _token):
+                url  = f"https://api.github.com/repos/{_repo}/contents/{path}"
+                hdrs = {"Authorization": f"token {_token}",
+                        "Accept": "application/vnd.github.v3+json"}
+                r = _req.get(url, headers=hdrs, timeout=10)
                 if r.status_code != 200:
                     return []
                 d = r.json()
                 return d if isinstance(d, list) else []
 
             @st.cache_data(ttl=300, show_spinner=False)
-            def _fetch_csv_stats(download_url):
-                return _req.get(download_url, headers=_lava_hdrs, timeout=10).content
+            def _fetch_csv_stats(download_url, _token):
+                hdrs = {"Authorization": f"token {_token}",
+                        "Accept": "application/vnd.github.v3+json"}
+                return _req.get(download_url, headers=hdrs, timeout=10).content
 
             # ── Filters ───────────────────────────────────────────────────────────
             dept_abbr       = get_dept_abbreviation(department)
@@ -1191,19 +1195,19 @@ try:
 
             fc1, fc2, fc3 = st.columns([1, 1, 1])
             with fc1:
-                sel_level = st.selectbox("Level", levels, key="stats_level")
+                sel_level = st.selectbox("Level", levels, key="stats_level_sel")
             with fc2:
                 sel_session = st.selectbox(
                     "Academic Session",
                     _all_sessions,
-                    key="stats_session",
+                    key="stats_session_sel",
                     help="Sessions are created when ICT starts a semester.",
                 )
             with fc3:
                 sel_sem_choice = st.selectbox(
                     "Semester",
                     ["First Semester", "Second Semester", "Both Semesters"],
-                    key="stats_sem_choice",
+                    key="stats_sem_choice_sel",
                 )
 
             file_prefix = f"{school_abbr_val}{dept_abbr}{sel_level}"
@@ -1212,6 +1216,7 @@ try:
                 for k in ["stats_master", "stats_matched_files"]:
                     st.session_state.pop(k, None)
                 st.session_state["stats_loaded"]      = True
+                st.session_state["stats_level"]       = sel_level
                 st.session_state["stats_prefix"]      = file_prefix
                 st.session_state["stats_session"]     = sel_session
                 st.session_state["stats_sem_choice"]  = sel_sem_choice
@@ -1221,8 +1226,18 @@ try:
                 st.stop()
 
             # ── Resolve which semester folders to scan ─────────────────────────────
+            # Guard: if any required key is missing, reset and prompt reload
+            _required_stats_keys = ["stats_session", "stats_sem_choice", "stats_level", "stats_prefix"]
+            if any(k not in st.session_state for k in _required_stats_keys):
+                for k in ["stats_loaded", "stats_master", "stats_matched_files"] + _required_stats_keys:
+                    st.session_state.pop(k, None)
+                st.info("Please choose your filters and click **Load Statistics**.")
+                st.stop()
+
             _session_str = st.session_state["stats_session"]
             _sem_choice  = st.session_state["stats_sem_choice"]
+            sel_level    = st.session_state["stats_level"]
+            file_prefix  = st.session_state["stats_prefix"]
             _sem_records = get_semesters_for_session(_session_str)
 
             # Map "First Semester" / "Second Semester" / "Both Semesters" to folder names
@@ -1253,7 +1268,7 @@ try:
                         _base_path = f"attendances/{_session_str}/{_sem_folder_name}"
                         # List date sub-folders
                         _date_folders = [
-                            f["name"] for f in _gh_list_stats(_base_path)
+                            f["name"] for f in _gh_list_stats(_base_path, _lava_repo, _lava_token)
                             if f.get("type") == "dir"
                         ]
                         progress = st.progress(0, text=f"Scanning {_sem_rec.get('name','')}...")
@@ -1262,7 +1277,7 @@ try:
                                 (_di + 1) / max(len(_date_folders), 1),
                                 text=f"Scanning {_date_folder}..."
                             )
-                            for f in _gh_list_stats(f"{_base_path}/{_date_folder}"):
+                            for f in _gh_list_stats(f"{_base_path}/{_date_folder}", _lava_repo, _lava_token):
                                 name = f.get("name", "")
                                 if not name.endswith(".csv"):
                                     continue
@@ -1303,7 +1318,7 @@ try:
                 for i, mf in enumerate(matched_files):
                     prog2.progress((i + 1) / len(matched_files), text=f"Loading {mf['name']}...")
                     try:
-                        raw = _fetch_csv_stats(mf["download_url"])
+                        raw = _fetch_csv_stats(mf["download_url"], _lava_token)
                         df  = _pd.read_csv(_BytesIO(raw))
                         df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
                         mat_col = next((c for c in df.columns if "matric" in c), None)
@@ -1626,7 +1641,6 @@ try:
 
                 if not st.session_state.get("remark_saved"):
                     st.info("Type your remark above (or leave blank) and tap **Save Remark & Generate Download**.")
-                    st.stop()
 
                 # ── Shared GPA block builder ───────────────────────────────────────
                 # Used by all three export formats

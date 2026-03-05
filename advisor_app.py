@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from futo_data import get_schools, get_departments, get_levels, get_full_structure, save_structure, invalidate_structure_cache, get_school_abbr
 from core import (
+    load_active_semester, start_semester, end_semester, load_semester_history,
+    load_student_gpa, assign_semester_gpa, compute_cgpa, get_dept_matric_numbers,
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
     get_all_advisors, load_settings, save_settings, hash_password,
@@ -247,8 +249,8 @@ try:
                 do_logout()
                 st.rerun()
 
-        ict_tab1, ict_tab2, ict_tab3, ict_tab4 = st.tabs(
-            ["👥 All Advisors", "➕ Create Advisor", "🏫 Schools & Depts", "⚙️ Settings"]
+        ict_tab1, ict_tab2, ict_tab3, ict_tab4, ict_tab5 = st.tabs(
+            ["👥 All Advisors", "➕ Create Advisor", "🏫 Schools & Depts", "⚙️ Settings", "📅 Semester"]
         )
 
         # ── ICT TAB 1 — View & manage all advisors ────────────────────────────────
@@ -572,6 +574,78 @@ try:
     | LAVA Repository | **successcugo/LAVA** |
     """)
             st.caption("GitHub credentials are in Streamlit Cloud secrets.")
+
+        # ── ICT TAB 5 — Semester Management ──────────────────────────────────────
+        with ict_tab5:
+            st.markdown("### 📅 Semester Management")
+            _active_sem = load_active_semester()
+
+            if _active_sem:
+                st.markdown(f"""<div class="info-card">
+                    <b>Active Semester:</b> {_active_sem['label']}<br>
+                    <b>Started:</b> {_active_sem['started_at'][:16].replace('T',' ')}&nbsp;·&nbsp;
+                    <b>By:</b> {_active_sem['started_by']}
+                </div>""", unsafe_allow_html=True)
+                st.warning("⚠️ Ending the semester will immediately block all student sign-ins and rep session starts.")
+                with st.form("end_sem_form"):
+                    st.markdown(f"**You are about to end: {_active_sem['label']}**")
+                    _end_confirm = st.checkbox("I confirm I want to end this semester")
+                    _end_btn = st.form_submit_button("⏹ End Semester", type="primary")
+                if _end_btn:
+                    if not _end_confirm:
+                        st.error("Please tick the confirmation checkbox.")
+                    else:
+                        _ok, _msg = end_semester(ended_by="ict_master")
+                        if _ok:
+                            st.success(_msg)
+                            st.rerun()
+                        else:
+                            st.error(_msg)
+            else:
+                st.info("No semester is currently active. Start one below.")
+                with st.form("start_sem_form"):
+                    _sem_name = st.selectbox(
+                        "Semester",
+                        ["First Semester", "Second Semester"],
+                        key="new_sem_name",
+                    )
+                    _sem_session = st.text_input(
+                        "Academic Session (e.g. 2025/2026)",
+                        placeholder="2025/2026",
+                        key="new_sem_session",
+                    )
+                    _start_btn = st.form_submit_button("▶️ Start Semester", type="primary")
+                if _start_btn:
+                    import re as _re
+                    if not _sem_session.strip():
+                        st.error("Please enter the academic session.")
+                    elif not _re.match(r"^\d{4}/\d{4}$", _sem_session.strip()):
+                        st.error("Session must be in the format YYYY/YYYY e.g. 2025/2026.")
+                    else:
+                        _ok, _msg = start_semester(_sem_name, _sem_session.strip(), "ict_master")
+                        if _ok:
+                            st.success(_msg)
+                            st.rerun()
+                        else:
+                            st.error(_msg)
+
+            st.divider()
+            st.markdown("#### 📜 Semester History")
+            _sem_hist = load_semester_history()
+            if not _sem_hist:
+                st.caption("No completed semesters yet.")
+            else:
+                import pandas as _spd
+                _sh_rows = []
+                for _s in _sem_hist:
+                    _sh_rows.append({
+                        "Semester":   _s.get("label", ""),
+                        "Started":    _s.get("started_at", "")[:16].replace("T", " "),
+                        "Ended":      _s.get("ended_at",   "")[:16].replace("T", " "),
+                        "Started By": _s.get("started_by", ""),
+                        "Ended By":   _s.get("ended_by",   ""),
+                    })
+                st.dataframe(_spd.DataFrame(_sh_rows), use_container_width=True, hide_index=True)
 
         st.stop()
 
@@ -932,6 +1006,134 @@ try:
                     f"**Total Units** = {total_units}\n\n"
                     f"**GPA** = {total_weighted:.0f} ÷ {total_units} = **{gpa:.2f}**"
                 )
+
+
+                # ── Assign GPA to Student ─────────────────────────────────────────────
+                st.divider()
+                st.markdown("### 🎓 Assign Semester GPA to Student")
+
+                _active_sem_gpa = load_active_semester()
+                if not _active_sem_gpa:
+                    st.warning("⚠️ No active semester. Ask ICT to start a semester before assigning GPAs.")
+                else:
+                    st.markdown(f"""<div class="info-card">
+                        <b>Assigning for:</b> {_active_sem_gpa['label']}
+                    </div>""", unsafe_allow_html=True)
+
+                    # Load matric list lazily — cached in session state
+                    if "gpa_matric_list" not in st.session_state:
+                        with st.spinner("Loading student matric numbers from LAVA..."):
+                            try:
+                                st.session_state.gpa_matric_list = get_dept_matric_numbers(school, department)
+                            except Exception:
+                                st.session_state.gpa_matric_list = []
+
+                    _matric_list = st.session_state.gpa_matric_list
+
+                    if not _matric_list:
+                        st.info("No student matric numbers found in LAVA records for your department yet.")
+                    else:
+                        _ga1, _ga2 = st.columns([3, 1])
+                        with _ga1:
+                            _sel_matric = st.selectbox(
+                                "Select Student Matric Number",
+                                _matric_list,
+                                key="gpa_assign_matric",
+                                help="Only students from your department's LAVA records are shown.",
+                            )
+                        with _ga2:
+                            if st.button("🔄 Refresh List", key="gpa_refresh_matric",
+                                         use_container_width=True):
+                                st.session_state.pop("gpa_matric_list", None)
+                                st.rerun()
+
+                        # Show existing CGPA for selected student
+                        _existing_records = load_student_gpa(_sel_matric)
+                        if _existing_records:
+                            _cgpa = compute_cgpa(_existing_records)
+                            _cgpa_colour = (
+                                "#27ae60" if _cgpa >= 4.5 else
+                                "#2980b9" if _cgpa >= 3.5 else
+                                "#f39c12" if _cgpa >= 2.4 else
+                                "#e67e22" if _cgpa >= 1.5 else "#c0392b"
+                            )
+                            _cgpa_standing = (
+                                "First Class" if _cgpa >= 4.5 else
+                                "Second Class Upper" if _cgpa >= 3.5 else
+                                "Second Class Lower" if _cgpa >= 2.4 else
+                                "Third Class" if _cgpa >= 1.5 else "Pass / Fail"
+                            )
+                            st.markdown(f"""
+                            <div style="display:flex;gap:1rem;margin:0.8rem 0;flex-wrap:wrap">
+                                <div style="background:rgba(0,0,0,0.05);border:2px solid {_cgpa_colour};
+                                    border-radius:12px;padding:1rem 1.5rem;text-align:center;min-width:140px">
+                                    <div style="font-size:2.2rem;font-weight:900;color:{_cgpa_colour};line-height:1">
+                                        {_cgpa:.2f}
+                                    </div>
+                                    <div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;
+                                        letter-spacing:1px;margin-top:0.3rem">CGPA</div>
+                                    <div style="font-size:0.8rem;color:{_cgpa_colour};margin-top:0.2rem;
+                                        font-weight:600">{_cgpa_standing}</div>
+                                </div>
+                                <div style="display:flex;align-items:center;font-size:0.9rem;opacity:0.7">
+                                    Based on {len(_existing_records)} semester(s)
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                            # Collapsible history table
+                            with st.expander(f"📋 Semester history for {_sel_matric}"):
+                                import pandas as _gpd
+                                _hist_rows = []
+                                for _r in _existing_records:
+                                    _hist_rows.append({
+                                        "Semester":    _r.get("semester", ""),
+                                        "GPA":         _r.get("gpa", ""),
+                                        "Assigned By": _r.get("assigned_by", ""),
+                                        "Date":        _r.get("assigned_at", "")[:10],
+                                    })
+                                st.dataframe(
+                                    _gpd.DataFrame(_hist_rows),
+                                    use_container_width=True, hide_index=True
+                                )
+                        else:
+                            st.caption(f"No GPA records yet for matric {_sel_matric}.")
+
+                        # Check if this semester already assigned
+                        _already = next(
+                            (r for r in _existing_records if r.get("semester") == _active_sem_gpa["label"]),
+                            None
+                        )
+                        if _already:
+                            st.info(
+                                f"A GPA of **{_already['gpa']}** has already been assigned for "
+                                f"**{_active_sem_gpa['label']}**. Submit again to update it."
+                            )
+
+                        # Assignment form
+                        with st.form("gpa_assign_form"):
+                            _new_gpa = st.number_input(
+                                f"GPA for {_active_sem_gpa['label']}",
+                                min_value=0.0, max_value=5.0,
+                                step=0.01, format="%.2f",
+                                value=float(_already["gpa"]) if _already else 0.0,
+                                key="gpa_assign_value",
+                            )
+                            _assign_btn = st.form_submit_button(
+                                "💾 Save GPA", type="primary", use_container_width=True
+                            )
+                        if _assign_btn:
+                            _ok_g, _msg_g = assign_semester_gpa(
+                                _sel_matric, _new_gpa,
+                                adv["username"], department
+                            )
+                            if _ok_g:
+                                st.success(_msg_g)
+                                # Refresh matric list cache for updated CGPA display
+                                st.session_state.pop("gpa_matric_list", None)
+                                st.rerun()
+                            else:
+                                st.error(_msg_g)
 
         # ── TAB 5 — Department Statistics ────────────────────────────────────────
         with tab5:
@@ -1690,7 +1892,6 @@ try:
         # ── TAB 7 — Chat ──────────────────────────────────────────────────────────
         with tab7:
             try:
-                import time as _time
                 import math as _math
 
                 # Advisor identity for chat
@@ -1701,9 +1902,14 @@ try:
 
                 # ── Room selector ──────────────────────────────────────────────────
                 _base_rooms  = all_rooms_for_advisor(_school_abbr)
-                # Build DM room list from all advisors
-                _all_advs    = get_all_advisors()
-                _others      = [a["username"] for a in _all_advs if a["username"] != _me]
+                # Cache advisor list - fetch once per login, not on every render
+                if "chat_advisors" not in st.session_state:
+                    try:
+                        _fa = get_all_advisors()
+                        st.session_state.chat_advisors = [a["username"] for a in _fa if a["username"] != _me]
+                    except Exception:
+                        st.session_state.chat_advisors = []
+                _others = st.session_state.chat_advisors
 
                 st.markdown("### 💬 Advisor Chat")
                 _col_rooms, _col_main = st.columns([1, 3])
@@ -1854,16 +2060,17 @@ try:
                                         }
                                     else:
                                         st.error("File upload failed. Message not sent.")
-                                        st.stop()
+                                        _file_upload_failed = True
 
-                                _ok = post_message(
-                                    _active_room, _me, _display,
-                                    _txt or "", _file_info
-                                )
-                                if _ok:
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to send. Please try again.")
+                                if not locals().get("_file_upload_failed"):
+                                    _ok = post_message(
+                                        _active_room, _me, _display,
+                                        _txt or "", _file_info
+                                    )
+                                    if _ok:
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to send. Please try again.")
             except Exception as _tab7_err:
                 import traceback as _tb
                 st.error(f"Chat error: {_tab7_err}")

@@ -16,8 +16,9 @@ from core import (
     add_entry, edit_entry, delete_entry, validate_matric,
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
-    futo_now, futo_now_str,
+    futo_now, futo_now_str, load_active_semester,
 )
+from streamlit_cookies_manager import EncryptedCookieManager
 
 st.set_page_config(
     page_title="ULAS — FUTO Attendance",
@@ -89,6 +90,15 @@ st.markdown("""
     <div class="badge">Federal University of Technology, Owerri</div>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Cookie manager (double-entry prevention) ─────────────────────────────────
+_cookies = EncryptedCookieManager(
+    prefix="ulas_",
+    password=st.secrets.get("COOKIE_SECRET", "ulas-demo-secret-changeme"),
+)
+if not _cookies.ready():
+    st.spinner("Loading...")
+    st.stop()
 
 # ── Session state defaults ────────────────────────────────────────────────────
 DEFAULTS = {
@@ -182,6 +192,17 @@ try:
         st.markdown("## 📋 Sign Attendance")
 
         # ── STAGE: select ─────────────────────────────────────────────────────────
+    # ── Semester gate: block students when no semester is active ──────────────────
+    _sem = load_active_semester()
+    if not _sem:
+        st.markdown("""<div class="info-card" style="text-align:center;padding:2rem">
+            <div style="font-size:2rem">🔒</div>
+            <b style="font-size:1.1rem">No Active Semester</b><br>
+            <span style="opacity:0.75">Attendance sign-in is not available right now.<br>
+            Please check back when your department notifies you of the new semester.</span>
+        </div>""", unsafe_allow_html=True)
+        st.stop()
+
         if st.session_state.stu_stage == "select":
             schools    = get_schools()
             cur_school = st.session_state.dd_school
@@ -264,7 +285,7 @@ try:
                 else:
                     st.error("❌ Invalid or expired code. Ask your rep for the current code and try again.")
 
-        # ── STAGE: entry ──────────────────────────────────────────────────────────
+        # ── STAGE: entry ──────────────────────────────────────────────
         elif st.session_state.stu_stage == "entry":
             sess = st.session_state.stu_session
             st.markdown(f"""<div class="info-card">
@@ -272,32 +293,23 @@ try:
                 <b>Dept:</b> {sess['department']} &nbsp;|&nbsp;
                 <b>Level:</b> {sess['level']}L
             </div>""", unsafe_allow_html=True)
-            st.markdown("Fill in your details. **Surname first, exactly as on your student ID.**")
 
-            st.markdown("""
-            <script>
-            (function(){
-                function gc(n){var v=document.cookie.match('(^|;) ?'+n+'=([^;]*)(;|$)');return v?v[2]:null;}
-                function sc(n,v,d){var e=new Date();e.setTime(e.getTime()+24*60*60*1000*d);
-                    document.cookie=n+'='+v+';expires='+e.toUTCString()+';path=/;SameSite=Lax';}
-                var id=gc('ulas_device_id');
-                if(!id){id='dev_'+Math.random().toString(36).substring(2,10)+'_'+Date.now();sc('ulas_device_id',id,365);}
-                function inj(){
-                    var inp=window.parent.document.querySelectorAll('input[aria-label="device_id"]');
-                    if(inp.length){
-                        var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-                        s.call(inp[0],id);inp[0].dispatchEvent(new Event('input',{bubbles:true}));
-                    } else {setTimeout(inj,200);}
-                }
-                inj();
-            })();
-            </script>""", unsafe_allow_html=True)
+            # ── Layer 1: cookie-based double-entry check ───────────────────
+            _ck_key = f"signed_{sess['course_code']}_{sess.get('started_at', '')[:10]}"
+            if _cookies.get(_ck_key):
+                st.markdown("""<div class="success-box">
+                    <div class="tick">✅</div>
+                    <h3>Already Signed In</h3>
+                    <p style="margin:0">This device has already recorded attendance for this class today.</p>
+                </div>""", unsafe_allow_html=True)
+                st.stop()
+
+            st.markdown("Fill in your details. **Surname first, exactly as on your student ID.**")
 
             with st.form("entry_form"):
                 surname     = st.text_input("Surname (Family Name)", placeholder="e.g. OKAFOR")
                 other_names = st.text_input("Other Names", placeholder="e.g. Chukwuemeka John")
                 matric      = st.text_input("Matric Number (11 digits)", placeholder="20200123456", max_chars=11)
-                device_id   = st.text_input("device_id", label_visibility="collapsed", key="device_id_input")
                 submit      = st.form_submit_button("✅ Sign Attendance", type="primary")
 
             if submit:
@@ -310,39 +322,53 @@ try:
                 if errs:
                     for e in errs: st.error(e)
                 else:
-                    dev_id = st.session_state.get("device_id_input", "").strip()
-                    with st.spinner("Submitting..."):
-                        current, sha = load_session(
-                            st.session_state.stu_school,
-                            st.session_state.stu_dept,
-                            st.session_state.stu_level,
-                        )
-                    if not current:
-                        st.error("Attendance ended before you submitted. Contact your course rep.")
-                        st.session_state.stu_stage = "select"
-                        st.rerun()
-
-                    allowed, dmsg = check_and_register_device(
-                        st.session_state.stu_school, st.session_state.stu_dept,
-                        st.session_state.stu_level, current["course_code"], dev_id, matric,
-                    )
-                    if not allowed:
-                        st.error(dmsg)
+                    # Layer 1 re-check before writing
+                    if _cookies.get(_ck_key):
+                        st.error("This device has already signed attendance for this class.")
                     else:
-                        ok, msg = add_entry(current, surname, other_names, matric)
-                        if ok:
-                            new_sha = save_session(
-                                st.session_state.stu_school, st.session_state.stu_dept,
-                                st.session_state.stu_level, current, sha,
+                        with st.spinner("Submitting..."):
+                            current, sha = load_session(
+                                st.session_state.stu_school,
+                                st.session_state.stu_dept,
+                                st.session_state.stu_level,
                             )
-                            if new_sha:
-                                st.session_state.stu_session = current
-                                st.session_state.stu_stage   = "done"
-                                st.rerun()
-                            else:
-                                st.error("Could not save your entry — please try again.")
+                        if not current:
+                            st.error("Attendance ended before you submitted. Contact your course rep.")
+                            st.session_state.stu_stage = "select"
+                            st.rerun()
                         else:
-                            st.error(msg)
+                            # Layer 2: stable device ID from cookie manager
+                            _dev_id = _cookies.get("device_id") or ""
+                            if not _dev_id:
+                                import uuid as _uuid
+                                _dev_id = "cm_" + str(_uuid.uuid4())[:12]
+                                _cookies["device_id"] = _dev_id
+                                _cookies.save()
+                            allowed, dmsg = check_and_register_device(
+                                st.session_state.stu_school, st.session_state.stu_dept,
+                                st.session_state.stu_level, current["course_code"],
+                                _dev_id, matric,
+                            )
+                            if not allowed:
+                                st.error(dmsg)
+                            else:
+                                ok, msg = add_entry(current, surname, other_names, matric)
+                                if ok:
+                                    new_sha = save_session(
+                                        st.session_state.stu_school, st.session_state.stu_dept,
+                                        st.session_state.stu_level, current, sha,
+                                    )
+                                    if new_sha:
+                                        # Write cookie so same device can't sign again
+                                        _cookies[_ck_key] = matric.strip()
+                                        _cookies.save()
+                                        st.session_state.stu_session = current
+                                        st.session_state.stu_stage   = "done"
+                                        st.rerun()
+                                    else:
+                                        st.error("Could not save your entry — please try again.")
+                                else:
+                                    st.error(msg)
 
         # ── STAGE: done ───────────────────────────────────────────────────────────
         elif st.session_state.stu_stage == "done":
@@ -475,7 +501,10 @@ try:
                 course_code = st.text_input("Course Code", placeholder="e.g. CSC301")
                 start_btn   = st.form_submit_button("Start Attendance", type="primary")
             if start_btn:
-                if not course_code.strip():
+                _sem_rep = load_active_semester()
+                if not _sem_rep:
+                    st.error("🔒 No active semester. ICT must start a semester before attendance can be taken.")
+                elif not course_code.strip():
                     st.error("Please enter a course code.")
                 else:
                     with st.spinner("Starting..."):

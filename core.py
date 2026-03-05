@@ -396,3 +396,166 @@ def push_attendance_to_lava(session: dict) -> tuple[bool, str]:
         except Exception:
             pass  # history write failure must never block a push
     return ok, msg
+
+
+# ── Semester management ───────────────────────────────────────────────────────
+SEMESTER_ACTIVE_PATH  = "semesters/active.json"
+SEMESTER_HISTORY_PATH = "semesters/history.json"
+
+def load_active_semester() -> dict | None:
+    """Return the active semester dict or None if no semester is running."""
+    data, _ = read_json(SEMESTER_ACTIVE_PATH)
+    return data if data else None
+
+def start_semester(name: str, session: str, started_by: str) -> tuple[bool, str]:
+    """
+    Start a new semester. name = 'First Semester' | 'Second Semester'.
+    session = '2025/2026'. Returns (ok, message).
+    """
+    existing = load_active_semester()
+    if existing:
+        return False, (
+            f"A semester is already active: "
+            f"{existing['name']} {existing['session']}. "
+            f"End it before starting a new one."
+        )
+    sem = {
+        "name":         name.strip(),
+        "session":      session.strip(),
+        "label":        f"{name.strip()} {session.strip()}",
+        "started_at":   futo_now_str(),
+        "started_by":   started_by,
+    }
+    new_sha = write_json(SEMESTER_ACTIVE_PATH, sem, f"Start semester: {sem['label']}")
+    if not new_sha:
+        return False, "GitHub write failed."
+    invalidate_cache("__active_semester")
+    return True, f"Semester started: {sem['label']}"
+
+def end_semester(ended_by: str) -> tuple[bool, str]:
+    """End the current active semester and archive it."""
+    sem, sha = read_json(SEMESTER_ACTIVE_PATH)
+    if not sem:
+        return False, "No active semester to end."
+    sem["ended_at"]  = futo_now_str()
+    sem["ended_by"]  = ended_by
+    # Archive to history
+    hist, h_sha = read_json(SEMESTER_HISTORY_PATH)
+    history = hist if isinstance(hist, list) else []
+    history.append(sem)
+    write_json(SEMESTER_HISTORY_PATH, history,
+               f"Archive semester: {sem.get('label','')}", h_sha)
+    # Delete active file
+    ok = delete_file(SEMESTER_ACTIVE_PATH, f"End semester: {sem.get('label','')}")
+    if not ok:
+        return False, "GitHub write failed."
+    invalidate_cache("__active_semester")
+    return True, f"Semester ended: {sem.get('label','')}"
+
+def load_semester_history() -> list:
+    data, _ = read_json(SEMESTER_HISTORY_PATH)
+    return list(reversed(data)) if isinstance(data, list) else []
+
+
+# ── GPA / CGPA ────────────────────────────────────────────────────────────────
+def _gpa_path(matric: str) -> str:
+    return f"gpa/{matric.strip()}.json"
+
+def load_student_gpa(matric: str) -> list:
+    """Return list of semester GPA records for a student, oldest first."""
+    data, _ = read_json(_gpa_path(matric))
+    return data if isinstance(data, list) else []
+
+def assign_semester_gpa(
+    matric: str,
+    gpa_value: float,
+    advisor_username: str,
+    advisor_dept: str,
+) -> tuple[bool, str]:
+    """
+    Assign a GPA for the current active semester to a student.
+    Overwrites if the same semester label already exists (advisor correction).
+    """
+    sem = load_active_semester()
+    if not sem:
+        return False, "No active semester. ICT must start a semester first."
+
+    label = sem["label"]
+    records = load_student_gpa(matric)
+    existing_sha = read_json(_gpa_path(matric))[1]
+
+    # Overwrite existing record for this semester if present
+    for r in records:
+        if r.get("semester") == label:
+            r["gpa"]          = round(float(gpa_value), 2)
+            r["assigned_by"]  = advisor_username
+            r["assigned_at"]  = futo_now_str()
+            r["dept"]         = advisor_dept
+            new_sha = write_json(
+                _gpa_path(matric), records,
+                f"GPA update: {matric} {label}", existing_sha
+            )
+            return (True, f"GPA updated for {matric} — {label}") if new_sha \
+                   else (False, "GitHub write failed.")
+
+    # New record
+    records.append({
+        "semester":    label,
+        "session":     sem["session"],
+        "gpa":         round(float(gpa_value), 2),
+        "assigned_by": advisor_username,
+        "assigned_at": futo_now_str(),
+        "dept":        advisor_dept,
+    })
+    new_sha = write_json(
+        _gpa_path(matric), records,
+        f"GPA assign: {matric} {label}", existing_sha
+    )
+    return (True, f"GPA recorded for {matric} — {label}") if new_sha \
+           else (False, "GitHub write failed.")
+
+def compute_cgpa(records: list) -> float:
+    """Average of all semester GPAs."""
+    if not records:
+        return 0.0
+    return round(sum(r["gpa"] for r in records) / len(records), 2)
+
+def get_dept_matric_numbers(school: str, department: str) -> list[str]:
+    """
+    Scan LAVA CSVs for matric numbers belonging to this dept.
+    Returns a sorted deduplicated list.
+    """
+    import base64
+    from github_store import _gh_get, _lava_repo
+
+    matric_set: set[str] = set()
+    school_abbr = get_school_abbr(school)
+    dept_abbr   = get_dept_abbreviation(department)
+    prefix      = f"{school_abbr}{dept_abbr}"
+
+    try:
+        repo         = _lava_repo()
+        folders_raw  = _gh_get(repo, "attendances")
+        if not folders_raw or not isinstance(folders_raw, list):
+            return []
+        for folder in folders_raw:
+            if folder.get("type") != "dir":
+                continue
+            files = _gh_get(repo, f"attendances/{folder['name']}")
+            if not files:
+                continue
+            for f in files:
+                fname = f.get("name", "")
+                if not fname.endswith(".csv") or not fname.startswith(prefix):
+                    continue
+                raw = _gh_get(repo, f"attendances/{folder['name']}/{fname}")
+                if not raw:
+                    continue
+                content = base64.b64decode(raw["content"]).decode()
+                for line in content.splitlines()[1:]:
+                    parts = line.split(",")
+                    if len(parts) >= 4:
+                        matric_set.add(parts[3].strip())
+    except Exception:
+        pass
+    return sorted(matric_set)

@@ -438,14 +438,24 @@ def start_semester(name: str, session: str, started_by: str) -> tuple[bool, str]
     if not new_sha:
         return False, "GitHub write failed."
     invalidate_cache("__active_semester")
-    # Create LAVA directory scaffold so the folder exists immediately
-    sem_session = session.replace("/", "-")
+    # Create LAVA directory scaffold immediately so the folder exists in LAVA
+    sem_session = session.strip().replace("/", "-")
     sem_name    = name.strip().replace(" ", "")
     lava_keep   = f"attendances/{sem_session}/{sem_name}/.gitkeep"
-    try:
-        push_csv_to_lava(lava_keep, "", f"Init: {sem['label']}")
-    except Exception:
-        pass  # non-fatal — attendance push will create path anyway
+    # GitHub requires non-empty file content
+    keep_content = (
+        f"# ULAS — {sem['label']}\n"
+        f"# Session: {session.strip()}\n"
+        f"# Created: {sem['started_at']}\n"
+        f"# Attendance records for this semester will appear in this folder.\n"
+    )
+    scaffold_ok, scaffold_msg = push_csv_to_lava(lava_keep, keep_content, f"Init: {sem['label']}")
+    if not scaffold_ok:
+        # Semester record already saved — return success but warn about folder
+        return True, (
+            f"Semester started: {sem['label']} "
+            f"(warning: could not create LAVA folder — {scaffold_msg})"
+        )
     return True, f"Semester started: {sem['label']}"
 
 def end_semester(ended_by: str) -> tuple[bool, str]:

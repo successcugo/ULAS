@@ -199,18 +199,18 @@ try:
 
         st.markdown("## 📋 Sign Attendance")
 
-        # ── STAGE: select ─────────────────────────────────────────────────────────
-    # ── Semester gate: block students when no semester is active ──────────────────
-    _sem = load_active_semester()
-    if not _sem:
-        st.markdown("""<div class="info-card" style="text-align:center;padding:2rem">
-            <div style="font-size:2rem">🔒</div>
-            <b style="font-size:1.1rem">No Active Semester</b><br>
-            <span style="opacity:0.75">Attendance sign-in is not available right now.<br>
-            Please check back when your department notifies you of the new semester.</span>
-        </div>""", unsafe_allow_html=True)
-        st.stop()
+        # ── Semester gate ──────────────────────────────────────────────────────────
+        _sem = load_active_semester()
+        if not _sem:
+            st.markdown("""<div class="info-card" style="text-align:center;padding:2rem">
+                <div style="font-size:2rem">🔒</div>
+                <b style="font-size:1.1rem">No Active Semester</b><br>
+                <span style="opacity:0.75">Attendance sign-in is not available right now.<br>
+                Please check back when your department notifies you of the new semester.</span>
+            </div>""", unsafe_allow_html=True)
+            st.stop()
 
+        # ── STAGE: select ──────────────────────────────────────────────────────────
         if st.session_state.stu_stage == "select":
             schools    = get_schools()
             cur_school = st.session_state.dd_school

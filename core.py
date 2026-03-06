@@ -203,23 +203,40 @@ def set_beacon(school: str, department: str, level: str,
     return True, f"Beacon set at {lat:.5f}, {lon:.5f}"
 
 
+# Maximum metres we will ever add to BEACON_RANGE for GPS uncertainty.
+_BEACON_ACC_CAP = 12
+
 def verify_beacon(student_lat: float, student_lon: float,
                   session: dict, student_accuracy: float = 0.0) -> tuple[bool, str]:
     """
     Check whether a student is within BEACON_RANGE of the rep beacon.
-    Effective allowed radius = BEACON_RANGE + beacon_accuracy + student_accuracy
-    so GPS drift on either device never causes a false rejection.
+
+    Tolerance padding rules (prevents campus-wide false passes):
+      - We add at most _BEACON_ACC_CAP metres of padding total.
+      - If either device reports accuracy worse than BEACON_RANGE we add no
+        padding at all — the reading is too coarse to be useful for cheating
+        detection, so we hold the hard line.
+      - Otherwise we add min(beacon_acc, student_acc, _BEACON_ACC_CAP).
+
     Returns (allowed, message).
     """
     b_lat = session.get("beacon_lat")
     b_lon = session.get("beacon_lon")
     if b_lat is None or b_lon is None:
         return False, "Beacon not set yet. Ask your course rep to activate the beacon first."
+
     dist_m     = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
     rng        = load_settings().get("BEACON_RANGE", 100)
     beacon_acc = float(session.get("beacon_accuracy") or 0)
-    # Effective limit accounts for GPS uncertainty on both devices
-    effective  = rng + beacon_acc + student_accuracy
+
+    # Only apply padding when both readings are reasonably precise
+    if beacon_acc <= rng and student_accuracy <= rng:
+        padding = min(beacon_acc, student_accuracy, _BEACON_ACC_CAP)
+    else:
+        padding = 0
+
+    effective = rng + padding
+
     if dist_m <= effective:
         return True, f"Location verified ({dist_m:.0f}m from beacon)"
     return False, (

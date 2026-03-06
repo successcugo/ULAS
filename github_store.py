@@ -49,12 +49,25 @@ def _gh_get(repo: str, path: str) -> dict | None:
         raise
 
 
+def _get_default_branch(repo: str) -> str:
+    """Fetch the repo's actual default branch name ('main', 'master', etc.)."""
+    url = f"https://api.github.com/repos/{repo}"
+    req = urllib.request.Request(url, headers=_headers())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read()).get("default_branch", "main")
+    except Exception:
+        return "main"
+
+
 def _gh_put(repo: str, path: str, content_bytes: bytes, message: str, sha: str | None = None) -> bool:
     """Write (create or update) a file on GitHub. Returns True on success."""
-    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    url    = f"https://api.github.com/repos/{repo}/contents/{path}"
+    branch = _get_default_branch(repo)
     payload: dict[str, Any] = {
         "message": message,
         "content": base64.b64encode(content_bytes).decode(),
+        "branch":  branch,
     }
     if sha:
         payload["sha"] = sha
@@ -64,7 +77,11 @@ def _gh_put(repo: str, path: str, content_bytes: bytes, message: str, sha: str |
         with urllib.request.urlopen(req) as resp:
             return resp.status in (200, 201)
     except urllib.error.HTTPError as e:
-        st.error(f"GitHub write error ({e.code}) for {path}: {e.read().decode()[:300]}")
+        body = e.read().decode()
+        st.error(
+            f"GitHub write error ({e.code}) writing `{path}` to `{repo}` "
+            f"(branch: `{branch}`): {body[:400]}"
+        )
         return False
 
 
@@ -124,17 +141,6 @@ def delete_file(path: str, message: str) -> bool:
 
 
 # ── CSV push to LAVA repo ─────────────────────────────────────────────────────
-
-def _get_default_branch(repo: str) -> str:
-    """Fetch the repo's actual default branch name ('main', 'master', etc.)."""
-    url = f"https://api.github.com/repos/{repo}"
-    req = urllib.request.Request(url, headers=_headers())
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read()).get("default_branch", "main")
-    except Exception:
-        return "main"
-
 
 def push_csv_to_lava(lava_path: str, csv_content: str, message: str) -> tuple[bool, str]:
     """Push a CSV file to the LAVA repo on its default branch."""

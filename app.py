@@ -318,12 +318,12 @@ try:
                     st.error("Could not read your GPS coordinates. Allow location access and try again.")
                     st.stop()
 
-                if s_acc > 500:
+                if s_acc > 200:
                     st.warning(
-                        f"⚠️ GPS signal is too weak to verify your location (±{s_acc:.0f}m). "
-                        "Try enabling Wi-Fi or moving outdoors briefly, then scan again."
+                        f"⚠️ GPS accuracy is low (±{s_acc:.0f}m). "
+                        "Your location check will use the strict range with no tolerance. "
+                        "For best results enable Wi-Fi or move near a window."
                     )
-                    st.stop()
 
                 allowed, vmsg = verify_beacon(s_lat, s_lon, fresh, student_accuracy=s_acc)
                 if allowed:

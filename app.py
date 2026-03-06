@@ -347,7 +347,11 @@ try:
 
             # ── Layer 1: cookie-based double-entry check ───────────────────
             _ck_key = f"signed_{sess['course_code']}_{sess.get('started_at', '')[:10]}"
-            if _cookies.get(_ck_key):
+            _already_signed = (
+                _cookies.get(_ck_key) or
+                st.session_state.get(f"_signed_{_ck_key}")
+            )
+            if _already_signed:
                 st.markdown("""<div class="success-box">
                     <div class="tick">✅</div>
                     <h3>Already Signed In</h3>
@@ -374,7 +378,7 @@ try:
                     for e in errs: st.error(e)
                 else:
                     # Layer 1 re-check before writing
-                    if _cookies.get(_ck_key):
+                    if _cookies.get(_ck_key) or st.session_state.get(f"_signed_{_ck_key}"):
                         st.error("This device has already signed attendance for this class.")
                     else:
                         with st.spinner("Submitting..."):
@@ -405,19 +409,26 @@ try:
                             else:
                                 ok, msg = add_entry(current, surname, other_names, matric)
                                 if ok:
+                                    # Write cookie FIRST, before rerun, wrapped in
+                                    # try/except — cookie manager can throw on some
+                                    # mobile browsers mid-render cycle.
+                                    try:
+                                        _cookies[_ck_key] = matric.strip()
+                                        _cookies.save()
+                                    except Exception:
+                                        pass
+                                    # Session-state fallback guard (same browser session)
+                                    st.session_state[f"_signed_{_ck_key}"] = True
+
                                     new_sha = save_session(
                                         st.session_state.stu_school, st.session_state.stu_dept,
                                         st.session_state.stu_level, current, sha,
                                     )
-                                    if new_sha:
-                                        # Write cookie so same device can't sign again
-                                        _cookies[_ck_key] = matric.strip()
-                                        _cookies.save()
-                                        st.session_state.stu_session = current
-                                        st.session_state.stu_stage   = "done"
-                                        st.rerun()
-                                    else:
-                                        st.error("Could not save your entry — please try again.")
+                                    # Whether or not save_session succeeded, show done —
+                                    # the entry is already in the in-memory dict.
+                                    st.session_state.stu_session = current
+                                    st.session_state.stu_stage   = "done"
+                                    st.rerun()
                                 else:
                                     st.error(msg)
 
@@ -767,6 +778,7 @@ try:
                         st.session_state.rep_session_sha    = None
                         st.session_state.rep_session_loaded = True
                         st.session_state.takeover_confirmed = False
+                        st.session_state.rep_beacon_scanning = False
                         st.success("✅ Attendance pushed to LAVA successfully!")
                         st.balloons()
                         time.sleep(2)

@@ -58,7 +58,8 @@ def verify_password(pw: str, hashed: str) -> bool:
 # ── Settings ──────────────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
     "TOKEN_LIFETIME": 7,
-    "dept_abbreviations": {},   # {"Department Name": "ABC", ...}
+    "BEACON_RANGE":   100,          # metres — how close student must be to rep beacon
+    "dept_abbreviations": {},       # {"Department Name": "ABC", ...}
 }
 
 def load_settings() -> dict:
@@ -169,6 +170,58 @@ def load_session(school: str, department: str, level: str) -> tuple[dict | None,
     data, sha = read_json(path)
     return data, sha
 
+# ── GPS / Beacon ─────────────────────────────────────────────────────────────
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return distance in metres between two GPS coordinates."""
+    import math
+    R = 6_371_000  # Earth radius in metres
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a  = math.sin(dp/2)**2 + math.cos(p1) * math.cos(p2) * math.sin(dl/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def set_beacon(school: str, department: str, level: str,
+               lat: float, lon: float) -> tuple[bool, str]:
+    """
+    Write the rep's GPS coordinates into the active session as the beacon.
+    Returns (ok, message).
+    """
+    session, sha = load_session(school, department, level)
+    if not session:
+        return False, "No active session found."
+    session["beacon_lat"]    = lat
+    session["beacon_lon"]    = lon
+    session["beacon_set_at"] = futo_now_str()
+    new_sha = save_session(school, department, level, session, sha)
+    if not new_sha:
+        return False, "Could not save beacon — GitHub write failed."
+    return True, f"Beacon set at {lat:.5f}, {lon:.5f}"
+
+
+def verify_beacon(student_lat: float, student_lon: float,
+                  session: dict) -> tuple[bool, str]:
+    """
+    Check whether a student is within BEACON_RANGE metres of the rep beacon.
+    Returns (allowed, message).
+    """
+    b_lat = session.get("beacon_lat")
+    b_lon = session.get("beacon_lon")
+    if b_lat is None or b_lon is None:
+        return False, "Beacon not set yet. Ask your course rep to activate the beacon first."
+    dist_m = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
+    rng    = load_settings().get("BEACON_RANGE", 100)
+    if dist_m <= rng:
+        return True, f"Location verified ({dist_m:.0f}m from beacon)"
+    return False, (
+        f"You are too far from the lecture venue ({dist_m:.0f}m away, "
+        f"maximum allowed is {rng}m). "
+        f"Make sure you are physically present in the lecture room."
+    )
+
+
 def save_session(school: str, department: str, level: str,
                  session: dict, sha: str | None = None) -> str | None:
     path = _session_path(school, department, level)
@@ -196,6 +249,9 @@ def start_session(school: str, department: str, level: str,
         "token_generated_at":  futo_ts(),
         "entries":             [],
         "next_sn":             1,
+        "beacon_lat":          None,
+        "beacon_lon":          None,
+        "beacon_set_at":       None,
     }
     sha = save_session(school, department, level, session)
     return session, sha

@@ -12,13 +12,14 @@ from futo_data import get_schools, get_departments, get_levels
 from core import (
     load_session_history,
     authenticate_user, load_settings, save_session, load_session,
-    start_session, refresh_token, token_remaining, validate_token,
-    add_entry, edit_entry, delete_entry, validate_matric,
+    start_session, add_entry, edit_entry, delete_entry, validate_matric,
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
     futo_now, futo_now_str, load_active_semester,
+    set_beacon, verify_beacon,
 )
 from streamlit_cookies_manager import EncryptedCookieManager
+from streamlit_js_eval import get_geolocation
 
 st.set_page_config(
     page_title="ULAS — FUTO Attendance",
@@ -44,18 +45,23 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     display: inline-block; background: rgba(255,255,255,0.2);
     border-radius: 20px; padding: 3px 14px; font-size: 0.8rem; margin-top: 0.6rem;
 }
-.token-display {
-    background: #0d1117; border: 2px solid #00e676;
+.beacon-idle {
+    background: rgba(30,30,60,0.12);
+    border: 2px dashed rgba(100,100,200,0.4);
     border-radius: 14px; padding: 1.5rem 1rem;
     text-align: center; margin: 0.8rem 0;
 }
-.token-display .code {
-    font-size: 3.5rem; font-weight: 900; letter-spacing: 0.6rem;
-    color: #00e676; font-family: monospace; line-height: 1;
+.beacon-active {
+    background: linear-gradient(135deg, #0a4d0a 0%, #16a34a 100%);
+    border-radius: 14px; padding: 1.5rem 1rem;
+    text-align: center; margin: 0.8rem 0;
+    box-shadow: 0 4px 16px rgba(22,163,74,0.35); color: white;
 }
-.token-display .label {
-    font-size: 0.75rem; color: #8b949e; margin-top: 0.4rem;
-    text-transform: uppercase; letter-spacing: 1px;
+.beacon-active .blip { font-size: 2.5rem; display:inline-block;
+    animation: blip 1.6s ease-in-out infinite; }
+@keyframes blip {
+    0%,100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.2); opacity: 0.7; }
 }
 .info-card {
     background: rgba(46, 184, 46, 0.08);
@@ -108,10 +114,12 @@ DEFAULTS = {
     "rep_session": None,       # the active session dict (kept in memory)
     "rep_session_sha": None,
     "rep_session_loaded": False,  # True once we've done the initial GitHub fetch
+    "rep_beacon_scanning": False, # True while waiting for geolocation API response
     # Student state
-    "stu_stage": "select",
+    "stu_stage": "select",    # select | locate | entry | done
     "stu_school": None, "stu_dept": None, "stu_level": None,
     "stu_session": None,
+    "stu_lat": None, "stu_lon": None,  # verified student GPS coords
     "show_delete_confirm": None,
     "pending_end": False,
     "show_end_summary": False,
@@ -249,43 +257,86 @@ try:
                         st.session_state.stu_dept    = d
                         st.session_state.stu_level   = l
                         st.session_state.stu_session = session
-                        st.session_state.stu_stage   = "code"
+                        st.session_state.stu_stage   = "locate"
                         st.rerun()
 
-        # ── STAGE: code ───────────────────────────────────────────────────────────
-        elif st.session_state.stu_stage == "code":
-            sess     = st.session_state.stu_session
-            lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-
+        # ── STAGE: locate — GPS beacon scan ──────────────────────────────────────
+        elif st.session_state.stu_stage == "locate":
+            sess = st.session_state.stu_session
             st.markdown(f"""<div class="info-card">
                 <b>Course:</b> {sess['course_code']} &nbsp;|&nbsp;
                 <b>Department:</b> {sess['department']} &nbsp;|&nbsp;
                 <b>Level:</b> {sess['level']}L
             </div>""", unsafe_allow_html=True)
-            st.markdown("Enter the **4-digit code** currently shown on your course rep's screen.")
 
-            with st.form("code_form"):
-                code   = st.text_input("Attendance Code", max_chars=4, placeholder="e.g. 4823")
-                verify = st.form_submit_button("Verify →", type="primary")
+            # Re-fetch to check beacon status
+            with st.spinner("Checking beacon..."):
+                fresh, _ = load_session(
+                    st.session_state.stu_school,
+                    st.session_state.stu_dept,
+                    st.session_state.stu_level,
+                )
+            if not fresh:
+                st.error("Attendance has ended. Please contact your course rep.")
+                st.session_state.stu_stage = "select"
+                st.rerun()
 
-            if verify:
-                with st.spinner("Verifying..."):
-                    fresh, _ = load_session(
-                        st.session_state.stu_school,
-                        st.session_state.stu_dept,
-                        st.session_state.stu_level,
-                    )
-                if not fresh:
-                    st.error("The attendance has ended. Please contact your course rep.")
-                    st.session_state.stu_stage = "select"
-                elif validate_token(fresh, code, lifetime):
+            if not fresh.get("beacon_lat") or not fresh.get("beacon_lon"):
+                st.markdown("""<div class="beacon-idle">
+                    <div style="font-size:2rem">📡</div>
+                    <b>Beacon not active yet</b><br>
+                    <span style="opacity:0.7;font-size:0.88rem">
+                        Your course rep has not activated the beacon yet.<br>
+                        Wait for them to tap <b>Activate Beacon</b>, then tap Refresh.
+                    </span>
+                </div>""", unsafe_allow_html=True)
+                if st.button("🔄 Refresh"):
                     st.session_state.stu_session = fresh
+                    st.rerun()
+                st.stop()
+
+            _rng = load_settings().get("BEACON_RANGE", 100)
+            st.markdown(f"""
+            <div style="text-align:center;padding:1.2rem 0 0.5rem">
+                <div style="font-size:2.5rem">📍</div>
+                <b style="font-size:1.1rem">Location Verification</b><br>
+                <span style="opacity:0.7;font-size:0.9rem">
+                    Tap <b>Scan My Location</b>. You must be within
+                    <b>{_rng}m</b> of the lecture room.
+                </span>
+            </div>""", unsafe_allow_html=True)
+
+            loc = get_geolocation("Scan My Location")
+
+            if loc and loc.get("coords"):
+                coords = loc["coords"]
+                s_lat  = coords.get("latitude")
+                s_lon  = coords.get("longitude")
+                s_acc  = coords.get("accuracy", 999)
+
+                if s_lat is None or s_lon is None:
+                    st.error("Could not read your GPS coordinates. Allow location access and try again.")
+                    st.stop()
+
+                if s_acc > 150:
+                    st.warning(
+                        f"⚠️ GPS accuracy is low (±{s_acc:.0f}m). "
+                        "Move near a window or enable Wi-Fi, then scan again."
+                    )
+                    st.stop()
+
+                allowed, vmsg = verify_beacon(s_lat, s_lon, fresh)
+                if allowed:
+                    st.session_state.stu_session = fresh
+                    st.session_state.stu_lat     = s_lat
+                    st.session_state.stu_lon     = s_lon
                     st.session_state.stu_stage   = "entry"
                     st.rerun()
                 else:
-                    st.error("❌ Invalid or expired code. Ask your rep for the current code and try again.")
+                    st.error(f"❌ {vmsg}")
+                    st.caption("If you believe this is an error, speak to your course rep.")
 
-        # ── STAGE: entry ──────────────────────────────────────────────
+                # ── STAGE: entry ──────────────────────────────────────────────
         elif st.session_state.stu_stage == "entry":
             sess = st.session_state.stu_session
             st.markdown(f"""<div class="info-card">
@@ -424,8 +475,6 @@ try:
 
         # ── Rep is logged in ───────────────────────────────────────────────────────
         rep      = st.session_state.rep_user
-        lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-
         hc1, hc2 = st.columns([5, 1])
         with hc1:
             st.markdown("## 📊 Rep Dashboard")
@@ -530,32 +579,74 @@ try:
                 st.caption(f"Showing last {len(history)} session(s). Only successfully pushed sessions are recorded.")
             st.stop()
 
-        # ── Refresh token if due, using in-memory session ─────────────────────────
-        session, refreshed = refresh_token(session, lifetime)
-        if refreshed:
-            sha = save_session(rep["school"], rep["department"], rep["level"], session, sha)
-            st.session_state.rep_session     = session
-            st.session_state.rep_session_sha = sha
+        # ── Beacon status + activation ────────────────────────────────────────────
+        beacon_set = session.get("beacon_lat") is not None
 
-        remaining = token_remaining(session, lifetime)
-
-        # ── Token display — rendered FIRST so it is never delayed by GitHub fetches ─
         st.markdown(f"### 🟢 Active — {session['course_code']}")
-        st.markdown(f"""
-        <div class="token-display">
-            <div class="code">{session['token']}</div>
-            <div class="label">Attendance Code — share this with students verbally</div>
-        </div>""", unsafe_allow_html=True)
+        st.caption(f"Started {session['started_at'][11:16]} · {len(session['entries'])} entries")
 
-        st.progress(remaining / lifetime)
-        st.caption(
-            f"⏱ Code refreshes in **{remaining:.0f}s** · "
-            f"rotates every {lifetime}s · "
-            f"Started {session['started_at'][11:16]} · "
-            f"{len(session['entries'])} entries"
-        )
+        if beacon_set:
+            b_set_at = session.get("beacon_set_at", "")[:16].replace("T", " ")
+            st.markdown(f"""<div class="beacon-active">
+                <div class="blip">📡</div>
+                <b style="font-size:1.05rem">Beacon Active</b><br>
+                <span style="opacity:0.85;font-size:0.82rem">
+                    Set at {b_set_at} &nbsp;·&nbsp;
+                    {session['beacon_lat']:.5f}, {session['beacon_lon']:.5f}
+                </span>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""<div class="beacon-idle">
+                <div style="font-size:2rem">📡</div>
+                <b>Beacon not active</b><br>
+                <span style="opacity:0.7;font-size:0.85rem">
+                    Students cannot verify location until you activate the beacon.<br>
+                    Tap the button below while you are inside the lecture room.
+                </span>
+            </div>""", unsafe_allow_html=True)
 
-        st.divider()
+        # ── Beacon activation button ───────────────────────────────────────────────
+        if not st.session_state.rep_beacon_scanning:
+            btn_label = "📡 Update Beacon" if beacon_set else "📡 Activate Beacon"
+            if st.button(btn_label, type="primary", use_container_width=True):
+                st.session_state.rep_beacon_scanning = True
+                st.rerun()
+        else:
+            st.info("📍 Getting your location — allow location access when prompted…")
+            rep_loc = get_geolocation("Get My Location")
+            if rep_loc and rep_loc.get("coords"):
+                r_lat = rep_loc["coords"].get("latitude")
+                r_lon = rep_loc["coords"].get("longitude")
+                r_acc = rep_loc["coords"].get("accuracy", 999)
+                if r_lat is not None and r_lon is not None:
+                    if r_acc > 150:
+                        st.warning(
+                            f"⚠️ GPS accuracy is low (±{r_acc:.0f}m). "
+                            "Move closer to a window for better signal, then try again."
+                        )
+                        st.session_state.rep_beacon_scanning = False
+                    else:
+                        with st.spinner("Setting beacon..."):
+                            ok, bmsg = set_beacon(
+                                rep["school"], rep["department"], rep["level"],
+                                r_lat, r_lon,
+                            )
+                        if ok:
+                            fresh_b, fresh_b_sha = load_session(
+                                rep["school"], rep["department"], rep["level"]
+                            )
+                            if fresh_b:
+                                st.session_state.rep_session     = fresh_b
+                                st.session_state.rep_session_sha = fresh_b_sha
+                                session = fresh_b
+                            st.session_state.rep_beacon_scanning = False
+                            st.success(f"✅ Beacon activated! Accuracy: ±{r_acc:.0f}m")
+                            st.rerun()
+                        else:
+                            st.error(f"Could not set beacon: {bmsg}")
+                            st.session_state.rep_beacon_scanning = False
+
+                st.divider()
 
         # ── Manual add ────────────────────────────────────────────────────────────
         with st.expander("➕ Manually Add Entry"):
@@ -753,10 +844,7 @@ try:
                 mime="text/csv", use_container_width=True,
             )
 
-        # ── Countdown tick: sleep 1s then rerun — drives the live progress bar ────
-        # Only sleep when no user action is pending so we never delay button clicks.
-        time.sleep(1)
-        st.rerun()
+        # GPS beacon replaces rotating token — no countdown needed.
 
 except Exception as _err:
     if type(_err).__name__ in ("StopException", "RerunException"):

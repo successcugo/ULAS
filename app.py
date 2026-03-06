@@ -318,14 +318,14 @@ try:
                     st.error("Could not read your GPS coordinates. Allow location access and try again.")
                     st.stop()
 
-                if s_acc > 150:
+                if s_acc > 500:
                     st.warning(
-                        f"⚠️ GPS accuracy is low (±{s_acc:.0f}m). "
-                        "Move near a window or enable Wi-Fi, then scan again."
+                        f"⚠️ GPS signal is too weak to verify your location (±{s_acc:.0f}m). "
+                        "Try enabling Wi-Fi or moving outdoors briefly, then scan again."
                     )
                     st.stop()
 
-                allowed, vmsg = verify_beacon(s_lat, s_lon, fresh)
+                allowed, vmsg = verify_beacon(s_lat, s_lon, fresh, student_accuracy=s_acc)
                 if allowed:
                     st.session_state.stu_session = fresh
                     st.session_state.stu_lat     = s_lat
@@ -630,18 +630,16 @@ try:
                 r_lon = rep_loc["coords"].get("longitude")
                 r_acc = rep_loc["coords"].get("accuracy", 999)
                 if r_lat is not None and r_lon is not None:
-                    if r_acc > 150:
+                    if r_acc > 500:
                         st.warning(
-                            f"⚠️ GPS accuracy is low (±{r_acc:.0f}m). "
-                            "Move closer to a window for better signal, then try again."
+                            f"⚠️ GPS signal is very weak (±{r_acc:.0f}m). "
+                            "Beacon set — but consider retapping once signal improves."
                         )
-                        st.session_state.rep_beacon_scanning = False
-                    else:
-                        with st.spinner("Setting beacon..."):
-                            ok, bmsg = set_beacon(
-                                rep["school"], rep["department"], rep["level"],
-                                r_lat, r_lon,
-                            )
+                    with st.spinner("Setting beacon..."):
+                        ok, bmsg = set_beacon(
+                            rep["school"], rep["department"], rep["level"],
+                            r_lat, r_lon, r_acc,
+                        )
                         if ok:
                             fresh_b, fresh_b_sha = load_session(
                                 rep["school"], rep["department"], rep["level"]

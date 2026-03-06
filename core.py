@@ -184,17 +184,19 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def set_beacon(school: str, department: str, level: str,
-               lat: float, lon: float) -> tuple[bool, str]:
+               lat: float, lon: float, accuracy: float = 0.0) -> tuple[bool, str]:
     """
     Write the rep's GPS coordinates into the active session as the beacon.
+    accuracy = GPS accuracy radius in metres at the time of setting.
     Returns (ok, message).
     """
     session, sha = load_session(school, department, level)
     if not session:
         return False, "No active session found."
-    session["beacon_lat"]    = lat
-    session["beacon_lon"]    = lon
-    session["beacon_set_at"] = futo_now_str()
+    session["beacon_lat"]      = lat
+    session["beacon_lon"]      = lon
+    session["beacon_accuracy"] = accuracy   # stored so verify can factor it in
+    session["beacon_set_at"]   = futo_now_str()
     new_sha = save_session(school, department, level, session, sha)
     if not new_sha:
         return False, "Could not save beacon — GitHub write failed."
@@ -202,18 +204,23 @@ def set_beacon(school: str, department: str, level: str,
 
 
 def verify_beacon(student_lat: float, student_lon: float,
-                  session: dict) -> tuple[bool, str]:
+                  session: dict, student_accuracy: float = 0.0) -> tuple[bool, str]:
     """
-    Check whether a student is within BEACON_RANGE metres of the rep beacon.
+    Check whether a student is within BEACON_RANGE of the rep beacon.
+    Effective allowed radius = BEACON_RANGE + beacon_accuracy + student_accuracy
+    so GPS drift on either device never causes a false rejection.
     Returns (allowed, message).
     """
     b_lat = session.get("beacon_lat")
     b_lon = session.get("beacon_lon")
     if b_lat is None or b_lon is None:
         return False, "Beacon not set yet. Ask your course rep to activate the beacon first."
-    dist_m = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
-    rng    = load_settings().get("BEACON_RANGE", 100)
-    if dist_m <= rng:
+    dist_m     = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
+    rng        = load_settings().get("BEACON_RANGE", 100)
+    beacon_acc = float(session.get("beacon_accuracy") or 0)
+    # Effective limit accounts for GPS uncertainty on both devices
+    effective  = rng + beacon_acc + student_accuracy
+    if dist_m <= effective:
         return True, f"Location verified ({dist_m:.0f}m from beacon)"
     return False, (
         f"You are too far from the lecture venue ({dist_m:.0f}m away, "

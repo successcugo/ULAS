@@ -120,6 +120,7 @@ DEFAULTS = {
     "stu_school": None, "stu_dept": None, "stu_level": None,
     "stu_session": None,
     "stu_lat": None, "stu_lon": None,  # verified student GPS coords
+    "stu_gps_acc": None, "stu_gps_dist": None,  # accuracy (m) and raw distance to beacon (m)
     "show_delete_confirm": None,
     "pending_end": False,
     "show_end_summary": False,
@@ -328,10 +329,16 @@ try:
 
                 allowed, vmsg = verify_beacon(s_lat, s_lon, fresh, student_accuracy=s_acc)
                 if allowed:
-                    st.session_state.stu_session = fresh
-                    st.session_state.stu_lat     = s_lat
-                    st.session_state.stu_lon     = s_lon
-                    st.session_state.stu_stage   = "entry"
+                    from core import haversine_m as _hav
+                    _raw_dist = _hav(s_lat, s_lon,
+                                     float(fresh["beacon_lat"]),
+                                     float(fresh["beacon_lon"]))
+                    st.session_state.stu_session    = fresh
+                    st.session_state.stu_lat        = s_lat
+                    st.session_state.stu_lon        = s_lon
+                    st.session_state.stu_gps_acc    = s_acc
+                    st.session_state.stu_gps_dist   = _raw_dist
+                    st.session_state.stu_stage      = "entry"
                     st.rerun()
                 else:
                     st.error(f"❌ {vmsg}")
@@ -345,6 +352,22 @@ try:
                 <b>Dept:</b> {sess['department']} &nbsp;|&nbsp;
                 <b>Level:</b> {sess['level']}L
             </div>""", unsafe_allow_html=True)
+
+            # ── GPS verification summary ───────────────────────────────────
+            _gps_acc  = st.session_state.get("stu_gps_acc")
+            _gps_dist = st.session_state.get("stu_gps_dist")
+            if _gps_acc is not None and _gps_dist is not None:
+                _tier_label, _tier_emoji, _ = gps_accuracy_tier(_gps_acc)
+                st.markdown(
+                    f"<div style='"
+                    f"font-size:0.82rem;opacity:0.75;text-align:center;"
+                    f"padding:0.35rem 0 0.6rem;letter-spacing:0.01em'>"
+                    f"{_tier_emoji} GPS Signal: <b>{_tier_label}</b>"
+                    f" &nbsp;·&nbsp; Accuracy: <b>±{_gps_acc:.0f}m</b>"
+                    f" &nbsp;·&nbsp; Distance from beacon: <b>{_gps_dist:.0f}m</b>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
             # ── Layer 1: cookie-based double-entry check ───────────────────
             _ck_key = f"signed_{sess['course_code']}_{sess.get('started_at', '')[:10]}"

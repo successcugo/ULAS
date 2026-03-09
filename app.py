@@ -16,7 +16,7 @@ from core import (
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
     futo_now, futo_now_str, load_active_semester,
-    set_beacon, verify_beacon,
+    set_beacon, verify_beacon, gps_accuracy_tier,
 )
 from streamlit_cookies_manager import EncryptedCookieManager
 from streamlit_js_eval import get_geolocation
@@ -318,12 +318,13 @@ try:
                     st.error("Could not read your GPS coordinates. Allow location access and try again.")
                     st.stop()
 
-                if s_acc > 200:
-                    st.warning(
-                        f"⚠️ GPS accuracy is low (±{s_acc:.0f}m). "
-                        "Your location check will use the strict range with no tolerance. "
-                        "For best results enable Wi-Fi or move near a window."
-                    )
+                tier_label, tier_emoji, _ = gps_accuracy_tier(s_acc)
+                st.markdown(
+                    f"<div style='text-align:center;font-size:1rem;padding:0.4rem 0'>"
+                    f"GPS Signal: {tier_emoji} <b>{tier_label}</b> (±{s_acc:.0f}m)"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
                 allowed, vmsg = verify_beacon(s_lat, s_lon, fresh, student_accuracy=s_acc)
                 if allowed:

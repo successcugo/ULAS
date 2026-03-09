@@ -203,20 +203,41 @@ def set_beacon(school: str, department: str, level: str,
     return True, f"Beacon set at {lat:.5f}, {lon:.5f}"
 
 
-# Maximum metres we will ever add to BEACON_RANGE for GPS uncertainty.
-_BEACON_ACC_CAP = 12
+def gps_accuracy_tier(accuracy_m: float) -> tuple[str, str, float]:
+    """
+    Convert GPS accuracy radius to a quality tier.
+    Returns (label, emoji, distance_deduction_metres).
+      🟢 Excellent  ≤10m   — no deduction (reading is trustworthy)
+      🟡 Good       ≤30m   — deduct 50m from measured distance
+      🟠 Fair       ≤100m  — deduct 150m from measured distance
+      🔴 Poor       >100m  — deduct 200m from measured distance
+    Deducting from distance gives poor-signal users benefit of the doubt
+    without expanding the allowed radius (which is exploitable).
+    Negative adjusted distance is still valid — it just means "definitely close".
+    """
+    if accuracy_m <= 10:
+        return "Excellent", "🟢", 0
+    elif accuracy_m <= 30:
+        return "Good", "🟡", 50
+    elif accuracy_m <= 100:
+        return "Fair", "🟠", 150
+    else:
+        return "Poor", "🔴", 200
+
 
 def verify_beacon(student_lat: float, student_lon: float,
                   session: dict, student_accuracy: float = 0.0) -> tuple[bool, str]:
     """
     Check whether a student is within BEACON_RANGE of the rep beacon.
 
-    Tolerance padding rules (prevents campus-wide false passes):
-      - We add at most _BEACON_ACC_CAP metres of padding total.
-      - If either device reports accuracy worse than BEACON_RANGE we add no
-        padding at all — the reading is too coarse to be useful for cheating
-        detection, so we hold the hard line.
-      - Otherwise we add min(beacon_acc, student_acc, _BEACON_ACC_CAP).
+    Distance adjustment by GPS quality tier:
+      🟢 Excellent — raw distance used as-is
+      🟡 Good      — subtract 50m from measured distance
+      🟠 Fair      — subtract 150m from measured distance
+      🔴 Poor      — subtract 200m from measured distance
+
+    Negative adjusted distance is valid (means device is very likely close).
+    Adjusted distance ≤ BEACON_RANGE → allowed. Otherwise → rejected.
 
     Returns (allowed, message).
     """
@@ -225,20 +246,13 @@ def verify_beacon(student_lat: float, student_lon: float,
     if b_lat is None or b_lon is None:
         return False, "Beacon not set yet. Ask your course rep to activate the beacon first."
 
-    dist_m     = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
-    rng        = load_settings().get("BEACON_RANGE", 100)
-    beacon_acc = float(session.get("beacon_accuracy") or 0)
+    dist_m          = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
+    rng             = load_settings().get("BEACON_RANGE", 100)
+    label, emoji, deduction = gps_accuracy_tier(student_accuracy)
+    adjusted_dist   = dist_m - deduction
 
-    # Only apply padding when both readings are reasonably precise
-    if beacon_acc <= rng and student_accuracy <= rng:
-        padding = min(beacon_acc, student_accuracy, _BEACON_ACC_CAP)
-    else:
-        padding = 0
-
-    effective = rng + padding
-
-    if dist_m <= effective:
-        return True, f"Location verified ({dist_m:.0f}m from beacon)"
+    if adjusted_dist <= rng:
+        return True, f"Location verified — GPS {emoji} {label} (±{student_accuracy:.0f}m)"
     return False, (
         f"You are too far from the lecture venue ({dist_m:.0f}m away, "
         f"maximum allowed is {rng}m). "

@@ -330,14 +330,16 @@ try:
                 allowed, vmsg = verify_beacon(s_lat, s_lon, fresh, student_accuracy=s_acc)
                 if allowed:
                     from core import haversine_m as _hav
-                    _raw_dist = _hav(s_lat, s_lon,
-                                     float(fresh["beacon_lat"]),
-                                     float(fresh["beacon_lon"]))
+                    _raw_dist  = _hav(s_lat, s_lon,
+                                      float(fresh["beacon_lat"]),
+                                      float(fresh["beacon_lon"]))
+                    _, _, _ded = gps_accuracy_tier(s_acc)
+                    _adj_dist  = max(_raw_dist - _ded, 0)  # floor at 0 for display
                     st.session_state.stu_session    = fresh
                     st.session_state.stu_lat        = s_lat
                     st.session_state.stu_lon        = s_lon
                     st.session_state.stu_gps_acc    = s_acc
-                    st.session_state.stu_gps_dist   = _raw_dist
+                    st.session_state.stu_gps_dist   = _adj_dist
                     st.session_state.stu_stage      = "entry"
                     st.rerun()
                 else:
@@ -364,7 +366,7 @@ try:
                     f"padding:0.35rem 0 0.6rem;letter-spacing:0.01em'>"
                     f"{_tier_emoji} GPS Signal: <b>{_tier_label}</b>"
                     f" &nbsp;·&nbsp; Accuracy: <b>±{_gps_acc:.0f}m</b>"
-                    f" &nbsp;·&nbsp; Distance from beacon: <b>{_gps_dist:.0f}m</b>"
+                    f" &nbsp;·&nbsp; Verified distance: <b>{_gps_dist:.0f}m</b>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )

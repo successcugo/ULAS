@@ -207,22 +207,22 @@ def gps_accuracy_tier(accuracy_m: float) -> tuple[str, str, float]:
     """
     Convert GPS accuracy radius to a quality tier.
     Returns (label, emoji, distance_deduction_metres).
-      🟢 Excellent  ≤10m   — no deduction (reading is trustworthy)
-      🟡 Good       ≤30m   — deduct 50m from measured distance
-      🟠 Fair       ≤100m  — deduct 150m from measured distance
-      🔴 Poor       >100m  — deduct 200m from measured distance
-    Deducting from distance gives poor-signal users benefit of the doubt
-    without expanding the allowed radius (which is exploitable).
-    Negative adjusted distance is still valid — it just means "definitely close".
+      🟢 Excellent  ≤10m   — 0m  deduction (reading is trustworthy)
+      🟡 Good       ≤30m   — 15m deduction (small drift allowance)
+      🟠 Fair       ≤100m  — 30m deduction (covers same-room GPS drift)
+      🔴 Poor       >100m  — 50m deduction (some relief, not a blank cheque)
+    Deducting from measured distance gives poor-signal users benefit of the
+    doubt for being in the same room without covering different buildings.
+    Negative adjusted distance is still valid — means "definitely close".
     """
     if accuracy_m <= 10:
         return "Excellent", "🟢", 0
     elif accuracy_m <= 30:
-        return "Good", "🟡", 50
+        return "Good", "🟡", 15
     elif accuracy_m <= 100:
-        return "Fair", "🟠", 150
+        return "Fair", "🟠", 30
     else:
-        return "Poor", "🔴", 200
+        return "Poor", "🔴", 50
 
 
 def verify_beacon(student_lat: float, student_lon: float,

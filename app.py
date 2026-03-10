@@ -319,7 +319,7 @@ try:
                     st.error("Could not read your GPS coordinates. Allow location access and try again.")
                     st.stop()
 
-                tier_label, tier_emoji, _ = gps_accuracy_tier(s_acc)
+                tier_label, tier_emoji = gps_accuracy_tier(s_acc)
                 st.markdown(
                     f"<div style='text-align:center;font-size:1rem;padding:0.4rem 0'>"
                     f"GPS Signal: {tier_emoji} <b>{tier_label}</b> (±{s_acc:.0f}m)"
@@ -330,11 +330,11 @@ try:
                 allowed, vmsg = verify_beacon(s_lat, s_lon, fresh, student_accuracy=s_acc)
                 if allowed:
                     from core import haversine_m as _hav
-                    _raw_dist  = _hav(s_lat, s_lon,
-                                      float(fresh["beacon_lat"]),
-                                      float(fresh["beacon_lon"]))
-                    _, _, _ded = gps_accuracy_tier(s_acc)
-                    _adj_dist  = max(_raw_dist - _ded, 0)  # floor at 0 for display
+                    _raw_dist    = _hav(s_lat, s_lon,
+                                        float(fresh["beacon_lat"]),
+                                        float(fresh["beacon_lon"]))
+                    _rep_acc     = float(fresh.get("beacon_accuracy") or 0)
+                    _adj_dist    = max(0.0, _raw_dist - (_rep_acc + s_acc))
                     st.session_state.stu_session    = fresh
                     st.session_state.stu_lat        = s_lat
                     st.session_state.stu_lon        = s_lon
@@ -359,7 +359,7 @@ try:
             _gps_acc  = st.session_state.get("stu_gps_acc")
             _gps_dist = st.session_state.get("stu_gps_dist")
             if _gps_acc is not None and _gps_dist is not None:
-                _tier_label, _tier_emoji, _ = gps_accuracy_tier(_gps_acc)
+                _tier_label, _tier_emoji = gps_accuracy_tier(_gps_acc)
                 st.markdown(
                     f"<div style='"
                     f"font-size:0.82rem;opacity:0.75;text-align:center;"

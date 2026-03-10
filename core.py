@@ -203,41 +203,36 @@ def set_beacon(school: str, department: str, level: str,
     return True, f"Beacon set at {lat:.5f}, {lon:.5f}"
 
 
-def gps_accuracy_tier(accuracy_m: float) -> tuple[str, str, float]:
+def gps_accuracy_tier(accuracy_m: float) -> tuple[str, str]:
     """
-    Convert GPS accuracy radius to a quality tier.
-    Returns (label, emoji, distance_deduction_metres).
-      🟢 Excellent  ≤10m   — 0m  deduction (reading is trustworthy)
-      🟡 Good       ≤30m   — 15m deduction (small drift allowance)
-      🟠 Fair       ≤100m  — 30m deduction (covers same-room GPS drift)
-      🔴 Poor       >100m  — 50m deduction (some relief, not a blank cheque)
-    Deducting from measured distance gives poor-signal users benefit of the
-    doubt for being in the same room without covering different buildings.
-    Negative adjusted distance is still valid — means "definitely close".
+    Convert GPS accuracy radius (metres) to a display tier.
+    Returns (label, emoji).
+    The tier is purely for display — accuracy is used directly in the
+    Adjusted Distance formula, not as a stepped deduction.
     """
     if accuracy_m <= 10:
-        return "Excellent", "🟢", 0
+        return "Excellent", "🟢"
     elif accuracy_m <= 30:
-        return "Good", "🟡", 15
+        return "Good", "🟡"
     elif accuracy_m <= 100:
-        return "Fair", "🟠", 30
+        return "Fair", "🟠"
     else:
-        return "Poor", "🔴", 50
+        return "Poor", "🔴"
 
 
 def verify_beacon(student_lat: float, student_lon: float,
                   session: dict, student_accuracy: float = 0.0) -> tuple[bool, str]:
     """
-    Check whether a student is within BEACON_RANGE of the rep beacon.
+    Horizontal Accuracy filtering method.
 
-    Distance adjustment by GPS quality tier:
-      🟢 Excellent — raw distance used as-is
-      🟡 Good      — subtract 50m from measured distance
-      🟠 Fair      — subtract 150m from measured distance
-      🔴 Poor      — subtract 200m from measured distance
+    Formula:
+        Raw_Distance     = haversine(student, beacon)
+        Adjusted_Distance = max(0, Raw_Distance - (rep_accuracy + student_accuracy))
 
-    Negative adjusted distance is valid (means device is very likely close).
-    Adjusted distance ≤ BEACON_RANGE → allowed. Otherwise → rejected.
+    The combined accuracy radii of both devices are subtracted from the raw
+    distance. If the two uncertainty circles overlap (adjusted ≤ 0), the
+    student is definitively close enough regardless of BEACON_RANGE.
+    Adjusted_Distance ≤ BEACON_RANGE → allowed.
 
     Returns (allowed, message).
     """
@@ -246,19 +241,18 @@ def verify_beacon(student_lat: float, student_lon: float,
     if b_lat is None or b_lon is None:
         return False, "Beacon not set yet. Ask your course rep to activate the beacon first."
 
-    dist_m          = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
-    rng             = load_settings().get("BEACON_RANGE", 100)
-    label, emoji, deduction = gps_accuracy_tier(student_accuracy)
-    adjusted_dist   = dist_m - deduction
+    raw_dist      = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
+    rep_accuracy  = float(session.get("beacon_accuracy") or 0)
+    rng           = load_settings().get("BEACON_RANGE", 100)
+    adj_dist      = max(0.0, raw_dist - (rep_accuracy + student_accuracy))
 
-    if adjusted_dist <= rng:
-        return True, f"Location verified — GPS {emoji} {label} (±{student_accuracy:.0f}m)"
+    if adj_dist <= rng:
+        return True, f"Location verified (adjusted distance: {adj_dist:.0f}m)"
     return False, (
-        f"You are too far from the lecture venue ({dist_m:.0f}m away, "
-        f"maximum allowed is {rng}m). "
+        f"You are too far from the lecture venue. "
+        f"Adjusted distance: {adj_dist:.0f}m, maximum allowed: {rng}m. "
         f"Make sure you are physically present in the lecture room."
     )
-
 
 def save_session(school: str, department: str, level: str,
                  session: dict, sha: str | None = None) -> str | None:

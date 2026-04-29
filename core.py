@@ -58,8 +58,7 @@ def verify_password(pw: str, hashed: str) -> bool:
 # ── Settings ──────────────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
     "TOKEN_LIFETIME": 7,
-    "BEACON_RANGE":   100,          # metres — how close student must be to rep beacon
-    "dept_abbreviations": {},       # {"Department Name": "ABC", ...}
+    "dept_abbreviations": {},   # {"Department Name": "ABC", ...}
 }
 
 def load_settings() -> dict:
@@ -170,90 +169,6 @@ def load_session(school: str, department: str, level: str) -> tuple[dict | None,
     data, sha = read_json(path)
     return data, sha
 
-# ── GPS / Beacon ─────────────────────────────────────────────────────────────
-
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Return distance in metres between two GPS coordinates."""
-    import math
-    R = 6_371_000  # Earth radius in metres
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a  = math.sin(dp/2)**2 + math.cos(p1) * math.cos(p2) * math.sin(dl/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-
-def set_beacon(school: str, department: str, level: str,
-               lat: float, lon: float, accuracy: float = 0.0) -> tuple[bool, str]:
-    """
-    Write the rep's GPS coordinates into the active session as the beacon.
-    accuracy = GPS accuracy radius in metres at the time of setting.
-    Returns (ok, message).
-    """
-    session, sha = load_session(school, department, level)
-    if not session:
-        return False, "No active session found."
-    session["beacon_lat"]      = lat
-    session["beacon_lon"]      = lon
-    session["beacon_accuracy"] = accuracy   # stored so verify can factor it in
-    session["beacon_set_at"]   = futo_now_str()
-    new_sha = save_session(school, department, level, session, sha)
-    if not new_sha:
-        return False, "Could not save beacon — GitHub write failed."
-    return True, f"Beacon set at {lat:.5f}, {lon:.5f}"
-
-
-def gps_accuracy_tier(accuracy_m: float) -> tuple[str, str]:
-    """
-    Convert GPS accuracy radius (metres) to a display tier.
-    Returns (label, emoji).
-    The tier is purely for display — accuracy is used directly in the
-    Adjusted Distance formula, not as a stepped deduction.
-    """
-    if accuracy_m <= 10:
-        return "Excellent", "🟢"
-    elif accuracy_m <= 30:
-        return "Good", "🟡"
-    elif accuracy_m <= 100:
-        return "Fair", "🟠"
-    else:
-        return "Poor", "🔴"
-
-
-def verify_beacon(student_lat: float, student_lon: float,
-                  session: dict, student_accuracy: float = 0.0) -> tuple[bool, str]:
-    """
-    Horizontal Accuracy filtering method.
-
-    Formula:
-        Raw_Distance     = haversine(student, beacon)
-        Adjusted_Distance = max(0, Raw_Distance - (rep_accuracy + student_accuracy))
-
-    The combined accuracy radii of both devices are subtracted from the raw
-    distance. If the two uncertainty circles overlap (adjusted ≤ 0), the
-    student is definitively close enough regardless of BEACON_RANGE.
-    Adjusted_Distance ≤ BEACON_RANGE → allowed.
-
-    Returns (allowed, message).
-    """
-    b_lat = session.get("beacon_lat")
-    b_lon = session.get("beacon_lon")
-    if b_lat is None or b_lon is None:
-        return False, "Beacon not set yet. Ask your course rep to activate the beacon first."
-
-    raw_dist      = haversine_m(student_lat, student_lon, float(b_lat), float(b_lon))
-    rep_accuracy  = float(session.get("beacon_accuracy") or 0)
-    rng           = load_settings().get("BEACON_RANGE", 100)
-    adj_dist      = max(0.0, raw_dist - (rep_accuracy + student_accuracy))
-
-    if adj_dist <= rng:
-        return True, f"Location verified (adjusted distance: {adj_dist:.0f}m)"
-    return False, (
-        f"You are too far from the lecture venue. "
-        f"Adjusted distance: {adj_dist:.0f}m, maximum allowed: {rng}m. "
-        f"Make sure you are physically present in the lecture room."
-    )
-
 def save_session(school: str, department: str, level: str,
                  session: dict, sha: str | None = None) -> str | None:
     path = _session_path(school, department, level)
@@ -281,9 +196,6 @@ def start_session(school: str, department: str, level: str,
         "token_generated_at":  futo_ts(),
         "entries":             [],
         "next_sn":             1,
-        "beacon_lat":          None,
-        "beacon_lon":          None,
-        "beacon_set_at":       None,
     }
     sha = save_session(school, department, level, session)
     return session, sha
@@ -526,24 +438,14 @@ def start_semester(name: str, session: str, started_by: str) -> tuple[bool, str]
     if not new_sha:
         return False, "GitHub write failed."
     invalidate_cache("__active_semester")
-    # Create LAVA directory scaffold immediately so the folder exists in LAVA
-    sem_session = session.strip().replace("/", "-")
+    # Create LAVA directory scaffold so the folder exists immediately
+    sem_session = session.replace("/", "-")
     sem_name    = name.strip().replace(" ", "")
     lava_keep   = f"attendances/{sem_session}/{sem_name}/.gitkeep"
-    # GitHub requires non-empty file content
-    keep_content = (
-        f"# ULAS — {sem['label']}\n"
-        f"# Session: {session.strip()}\n"
-        f"# Created: {sem['started_at']}\n"
-        f"# Attendance records for this semester will appear in this folder.\n"
-    )
-    scaffold_ok, scaffold_msg = push_csv_to_lava(lava_keep, keep_content, f"Init: {sem['label']}")
-    if not scaffold_ok:
-        # Semester record already saved — return success but warn about folder
-        return True, (
-            f"Semester started: {sem['label']} "
-            f"(warning: could not create LAVA folder — {scaffold_msg})"
-        )
+    try:
+        push_csv_to_lava(lava_keep, "", f"Init: {sem['label']}")
+    except Exception:
+        pass  # non-fatal — attendance push will create path anyway
     return True, f"Semester started: {sem['label']}"
 
 def end_semester(ended_by: str) -> tuple[bool, str]:

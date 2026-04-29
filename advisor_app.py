@@ -551,18 +551,18 @@ try:
             st.markdown("### System Settings")
             settings = load_settings()
             with st.form("ict_settings"):
-                br    = st.number_input(
-                    "BEACON_RANGE (metres)",
-                    min_value=10, max_value=1000, step=5,
-                    value=int(settings.get("BEACON_RANGE", 100)),
-                    help="Maximum distance in metres a student can be from the course rep's beacon location to sign attendance.",
+                tl    = st.number_input(
+                    "TOKEN_LIFETIME (seconds)",
+                    min_value=3, max_value=300, step=1,
+                    value=int(settings.get("TOKEN_LIFETIME", 7)),
+                    help="How often the 4-digit attendance code rotates",
                 )
                 s_btn = st.form_submit_button("💾 Save", type="primary")
             if s_btn:
-                settings["BEACON_RANGE"] = int(br)
+                settings["TOKEN_LIFETIME"] = int(tl)
                 if save_settings(settings):
                     invalidate_cache("__settings")
-                    st.success(f"Saved. BEACON_RANGE = {br}m")
+                    st.success(f"Saved. TOKEN_LIFETIME = {tl}s")
                 else:
                     st.error("GitHub write failed.")
 
@@ -570,7 +570,7 @@ try:
             st.markdown(f"""
     | Setting | Value |
     |---------|-------|
-    | BEACON_RANGE | **{settings.get('BEACON_RANGE',100)} metres** |
+    | TOKEN_LIFETIME | **{settings.get('TOKEN_LIFETIME',7)} seconds** |
     | Data Repository | **successcugo/ULASDATA** |
     | LAVA Repository | **successcugo/LAVA** |
     """)
@@ -625,10 +625,7 @@ try:
                     else:
                         _ok, _msg = start_semester(_sem_name, _sem_session.strip(), "ict_master")
                         if _ok:
-                            if "warning" in _msg.lower():
-                                st.warning(_msg)
-                            else:
-                                st.success(_msg)
+                            st.success(_msg)
                             st.rerun()
                         else:
                             st.error(_msg)

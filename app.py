@@ -191,18 +191,18 @@ try:
 
         st.markdown("## 📋 Sign Attendance")
 
-        # ── STAGE: select ─────────────────────────────────────────────────────────
-    # ── Semester gate: block students when no semester is active ──────────────────
-    _sem = load_active_semester()
-    if not _sem:
-        st.markdown("""<div class="info-card" style="text-align:center;padding:2rem">
-            <div style="font-size:2rem">🔒</div>
-            <b style="font-size:1.1rem">No Active Semester</b><br>
-            <span style="opacity:0.75">Attendance sign-in is not available right now.<br>
-            Please check back when your department notifies you of the new semester.</span>
-        </div>""", unsafe_allow_html=True)
-        st.stop()
+        # ── Semester gate ──────────────────────────────────────────────────────────
+        _sem = load_active_semester()
+        if not _sem:
+            st.markdown("""<div class="info-card" style="text-align:center;padding:2rem">
+                <div style="font-size:2rem">🔒</div>
+                <b style="font-size:1.1rem">No Active Semester</b><br>
+                <span style="opacity:0.75">Attendance sign-in is not available right now.<br>
+                Please check back when your department notifies you of the new semester.</span>
+            </div>""", unsafe_allow_html=True)
+            st.stop()
 
+        # ── STAGE: select ──────────────────────────────────────────────────────────
         if st.session_state.stu_stage == "select":
             schools    = get_schools()
             cur_school = st.session_state.dd_school
@@ -285,7 +285,7 @@ try:
                 else:
                     st.error("❌ Invalid or expired code. Ask your rep for the current code and try again.")
 
-        # ── STAGE: entry ──────────────────────────────────────────────
+                # ── STAGE: entry ──────────────────────────────────────────────
         elif st.session_state.stu_stage == "entry":
             sess = st.session_state.stu_session
             st.markdown(f"""<div class="info-card">
@@ -294,9 +294,15 @@ try:
                 <b>Level:</b> {sess['level']}L
             </div>""", unsafe_allow_html=True)
 
+
+
             # ── Layer 1: cookie-based double-entry check ───────────────────
             _ck_key = f"signed_{sess['course_code']}_{sess.get('started_at', '')[:10]}"
-            if _cookies.get(_ck_key):
+            _already_signed = (
+                _cookies.get(_ck_key) or
+                st.session_state.get(f"_signed_{_ck_key}")
+            )
+            if _already_signed:
                 st.markdown("""<div class="success-box">
                     <div class="tick">✅</div>
                     <h3>Already Signed In</h3>
@@ -323,7 +329,7 @@ try:
                     for e in errs: st.error(e)
                 else:
                     # Layer 1 re-check before writing
-                    if _cookies.get(_ck_key):
+                    if _cookies.get(_ck_key) or st.session_state.get(f"_signed_{_ck_key}"):
                         st.error("This device has already signed attendance for this class.")
                     else:
                         with st.spinner("Submitting..."):
@@ -354,19 +360,26 @@ try:
                             else:
                                 ok, msg = add_entry(current, surname, other_names, matric)
                                 if ok:
+                                    # Write cookie FIRST, before rerun, wrapped in
+                                    # try/except — cookie manager can throw on some
+                                    # mobile browsers mid-render cycle.
+                                    try:
+                                        _cookies[_ck_key] = matric.strip()
+                                        _cookies.save()
+                                    except Exception:
+                                        pass
+                                    # Session-state fallback guard (same browser session)
+                                    st.session_state[f"_signed_{_ck_key}"] = True
+
                                     new_sha = save_session(
                                         st.session_state.stu_school, st.session_state.stu_dept,
                                         st.session_state.stu_level, current, sha,
                                     )
-                                    if new_sha:
-                                        # Write cookie so same device can't sign again
-                                        _cookies[_ck_key] = matric.strip()
-                                        _cookies.save()
-                                        st.session_state.stu_session = current
-                                        st.session_state.stu_stage   = "done"
-                                        st.rerun()
-                                    else:
-                                        st.error("Could not save your entry — please try again.")
+                                    # Whether or not save_session succeeded, show done —
+                                    # the entry is already in the in-memory dict.
+                                    st.session_state.stu_session = current
+                                    st.session_state.stu_stage   = "done"
+                                    st.rerun()
                                 else:
                                     st.error(msg)
 
@@ -424,8 +437,6 @@ try:
 
         # ── Rep is logged in ───────────────────────────────────────────────────────
         rep      = st.session_state.rep_user
-        lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-
         hc1, hc2 = st.columns([5, 1])
         with hc1:
             st.markdown("## 📊 Rep Dashboard")
@@ -530,7 +541,8 @@ try:
                 st.caption(f"Showing last {len(history)} session(s). Only successfully pushed sessions are recorded.")
             st.stop()
 
-        # ── Refresh token if due, using in-memory session ─────────────────────────
+        # ── Refresh token if due ──────────────────────────────────────────────────
+        lifetime = load_settings().get("TOKEN_LIFETIME", 7)
         session, refreshed = refresh_token(session, lifetime)
         if refreshed:
             sha = save_session(rep["school"], rep["department"], rep["level"], session, sha)
@@ -539,7 +551,7 @@ try:
 
         remaining = token_remaining(session, lifetime)
 
-        # ── Token display — rendered FIRST so it is never delayed by GitHub fetches ─
+        # ── Token display ─────────────────────────────────────────────────────────
         st.markdown(f"### 🟢 Active — {session['course_code']}")
         st.markdown(f"""
         <div class="token-display">
@@ -753,8 +765,7 @@ try:
                 mime="text/csv", use_container_width=True,
             )
 
-        # ── Countdown tick: sleep 1s then rerun — drives the live progress bar ────
-        # Only sleep when no user action is pending so we never delay button clicks.
+        # ── Countdown tick ───────────────────────────────────────────────────────────
         time.sleep(1)
         st.rerun()
 

@@ -49,12 +49,31 @@ def _gh_get(repo: str, path: str) -> dict | None:
         raise
 
 
+_branch_cache: dict[str, str] = {}
+
+def _get_default_branch(repo: str) -> str:
+    """Fetch the repo's default branch name, cached in-process."""
+    if repo in _branch_cache:
+        return _branch_cache[repo]
+    url = f"https://api.github.com/repos/{repo}"
+    req = urllib.request.Request(url, headers=_headers())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            branch = json.loads(resp.read()).get("default_branch", "main")
+    except Exception:
+        branch = "main"
+    _branch_cache[repo] = branch
+    return branch
+
+
 def _gh_put(repo: str, path: str, content_bytes: bytes, message: str, sha: str | None = None) -> bool:
     """Write (create or update) a file on GitHub. Returns True on success."""
-    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    url    = f"https://api.github.com/repos/{repo}/contents/{path}"
+    branch = _get_default_branch(repo)
     payload: dict[str, Any] = {
         "message": message,
         "content": base64.b64encode(content_bytes).decode(),
+        "branch":  branch,
     }
     if sha:
         payload["sha"] = sha
@@ -64,7 +83,11 @@ def _gh_put(repo: str, path: str, content_bytes: bytes, message: str, sha: str |
         with urllib.request.urlopen(req) as resp:
             return resp.status in (200, 201)
     except urllib.error.HTTPError as e:
-        st.error(f"GitHub write error ({e.code}) for {path}: {e.read().decode()[:300]}")
+        body = e.read().decode()
+        st.error(
+            f"GitHub write error ({e.code}) writing `{path}` to `{repo}` "
+            f"(branch: `{branch}`): {body[:400]}"
+        )
         return False
 
 
@@ -97,9 +120,10 @@ def read_json(path: str) -> tuple[dict | list | None, str | None]:
 def write_json(path: str, data: dict | list, message: str, sha: str | None = None) -> str | None:
     """
     Write a JSON file to ULASDATA.
-    Returns new SHA on success, None on failure.
-    Pass sha= for updates, omit for creates.
+    Returns a truthy value on success, None on failure.
     Fetches current SHA automatically if not provided and file exists.
+    NOTE: does not re-fetch the new SHA after writing — callers should not
+    rely on the returned value being the real new SHA.
     """
     if sha is None:
         existing = _gh_get(_data_repo(), path)
@@ -110,9 +134,9 @@ def write_json(path: str, data: dict | list, message: str, sha: str | None = Non
     ok = _gh_put(_data_repo(), path, content, message, sha)
     if not ok:
         return None
-    # Fetch new SHA
-    result = _gh_get(_data_repo(), path)
-    return result["sha"] if result else None
+    # Return a sentinel truthy value — avoids an extra GET that can fail
+    # even when the write succeeded, causing false "write failed" errors.
+    return "ok"
 
 
 def delete_file(path: str, message: str) -> bool:
@@ -124,17 +148,6 @@ def delete_file(path: str, message: str) -> bool:
 
 
 # ── CSV push to LAVA repo ─────────────────────────────────────────────────────
-
-def _get_default_branch(repo: str) -> str:
-    """Fetch the repo's actual default branch name ('main', 'master', etc.)."""
-    url = f"https://api.github.com/repos/{repo}"
-    req = urllib.request.Request(url, headers=_headers())
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read()).get("default_branch", "main")
-    except Exception:
-        return "main"
-
 
 def push_csv_to_lava(lava_path: str, csv_content: str, message: str) -> tuple[bool, str]:
     """Push a CSV file to the LAVA repo on its default branch."""
@@ -202,10 +215,12 @@ def write_and_update_cache(cache_key: str, path: str, data: dict | list, message
     """Write to GitHub and update local cache with new SHA."""
     sha_key = cache_key + "__sha"
     current_sha = st.session_state.get(sha_key)
-    new_sha = write_json(path, data, message, sha=current_sha)
-    if new_sha:
+    ok = write_json(path, data, message, sha=current_sha)
+    if ok:
         st.session_state[cache_key] = data
-        st.session_state[sha_key] = new_sha
+        # Re-fetch the real SHA so subsequent writes have the correct value
+        result = _gh_get(_data_repo(), path)
+        st.session_state[sha_key] = result["sha"] if result else None
         return True
     return False
 

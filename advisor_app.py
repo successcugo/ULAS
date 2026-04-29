@@ -625,7 +625,10 @@ try:
                     else:
                         _ok, _msg = start_semester(_sem_name, _sem_session.strip(), "ict_master")
                         if _ok:
-                            st.success(_msg)
+                            if "warning" in _msg.lower():
+                                st.warning(_msg)
+                            else:
+                                st.success(_msg)
                             st.rerun()
                         else:
                             st.error(_msg)

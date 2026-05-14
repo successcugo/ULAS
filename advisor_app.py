@@ -24,6 +24,8 @@ from core import (
     lava_sem_path, get_available_sessions, get_semesters_for_session,
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
+    load_settings, save_settings, get_schools, get_departments, get_levels,
+    load_advisor_lifetime, save_advisor_lifetime,
     get_all_advisors, load_settings, save_settings, hash_password,
     verify_password, futo_now_str, get_dept_abbreviation, set_dept_abbreviation,
 )
@@ -549,21 +551,104 @@ try:
 
         # ── ICT TAB 4 — Settings ──────────────────────────────────────────────────
         with ict_tab4:
+            import datetime as _idt
             st.markdown("### System Settings")
             settings = load_settings()
-            with st.form("ict_settings"):
-                tl    = st.number_input(
+
+            # ── School Days & Hours ──────────────────────────────────────────────
+            st.markdown("#### 📅 School Days & Hours (WAT)")
+            _day_map = {1:"Monday",2:"Tuesday",3:"Wednesday",4:"Thursday",
+                        5:"Friday",6:"Saturday",7:"Sunday"}
+            _curr_days = settings.get("school_days", [1,2,3,4,5])
+            with st.form("ict_school_days"):
+                _sel_days = st.multiselect(
+                    "School Days",
+                    options=list(_day_map.keys()),
+                    format_func=lambda d: _day_map[d],
+                    default=_curr_days,
+                )
+                _dc1, _dc2 = st.columns(2)
+                with _dc1:
+                    _start_t = st.time_input(
+                        "School Start (WAT)",
+                        value=_idt.time(*map(int, settings.get("school_start","08:30").split(":"))),
+                    )
+                with _dc2:
+                    _end_t = st.time_input(
+                        "School End (WAT)",
+                        value=_idt.time(*map(int, settings.get("school_end","18:30").split(":"))),
+                    )
+                _day_btn = st.form_submit_button("💾 Save School Hours", type="primary")
+            if _day_btn:
+                if not _sel_days:
+                    st.error("Select at least one school day.")
+                elif _start_t >= _end_t:
+                    st.error("Start time must be before end time.")
+                else:
+                    settings["school_days"]  = sorted(_sel_days)
+                    settings["school_start"] = _start_t.strftime("%H:%M")
+                    settings["school_end"]   = _end_t.strftime("%H:%M")
+                    if save_settings(settings):
+                        invalidate_cache("__settings")
+                        st.success("School hours saved.")
+                    else:
+                        st.error("GitHub write failed.")
+
+            st.divider()
+
+            # ── Token Lifetime ────────────────────────────────────────────────────
+            st.markdown("#### 🔑 Token Lifetime")
+            with st.form("ict_token"):
+                tl = st.number_input(
                     "TOKEN_LIFETIME (seconds)",
                     min_value=3, max_value=300, step=1,
                     value=int(settings.get("TOKEN_LIFETIME", 7)),
                     help="How often the 4-digit attendance code rotates",
                 )
-                s_btn = st.form_submit_button("💾 Save", type="primary")
-            if s_btn:
+                st.form_submit_button("💾 Save", type="primary", key="tok_save")
+            if st.session_state.get("tok_save"):
                 settings["TOKEN_LIFETIME"] = int(tl)
                 if save_settings(settings):
                     invalidate_cache("__settings")
                     st.success(f"Saved. TOKEN_LIFETIME = {tl}s")
+                else:
+                    st.error("GitHub write failed.")
+
+            st.divider()
+
+            # ── Attendance Lifetime ────────────────────────────────────────────────
+            st.markdown("#### ⏱ Attendance Lifetime")
+            with st.form("ict_att_lifetime"):
+                _al1, _al2 = st.columns(2)
+                with _al1:
+                    st.markdown("**📖 Lecture**")
+                    _lec_lt  = st.number_input("Max Duration (minutes)", min_value=5,
+                                                max_value=480, step=5,
+                                                value=int(settings.get("lecture_lifetime",60)),
+                                                key="lec_lt")
+                    _lec_act = st.radio("When time expires", ["flag","kill"],
+                                        index=0 if settings.get("lecture_action","flag")=="flag" else 1,
+                                        format_func=lambda x: "⏰ Flag late entries" if x=="flag" else "⚡ Kill & auto-submit",
+                                        key="lec_act")
+                with _al2:
+                    st.markdown("**🔬 Practical**")
+                    _prac_lt  = st.number_input("Max Duration (minutes)", min_value=5,
+                                                 max_value=480, step=5,
+                                                 value=int(settings.get("practical_lifetime",120)),
+                                                 key="prac_lt")
+                    _prac_act = st.radio("When time expires", ["flag","kill"],
+                                         index=0 if settings.get("practical_action","flag")=="flag" else 1,
+                                         format_func=lambda x: "⏰ Flag late entries" if x=="flag" else "⚡ Kill & auto-submit",
+                                         key="prac_act")
+                _alt_btn = st.form_submit_button("💾 Save Lifetime Settings", type="primary")
+            if _alt_btn:
+                settings["lecture_lifetime"]   = int(_lec_lt)
+                settings["lecture_action"]     = _lec_act
+                settings["practical_lifetime"] = int(_prac_lt)
+                settings["practical_action"]   = _prac_act
+                if save_settings(settings):
+                    invalidate_cache("__settings")
+                    st.success("Attendance lifetime settings saved.")
                 else:
                     st.error("GitHub write failed.")
 
@@ -2451,6 +2536,58 @@ try:
                     <b>Account created:</b> {adv.get('created_at','—')}<br>
                     <b>Created by:</b> {adv.get('created_by','—')}
                 </div>""", unsafe_allow_html=True)
+
+                st.divider()
+
+                # ── Attendance Lifetime Overrides (per level) ─────────────────────
+                st.markdown("### ⏱ Attendance Lifetime Settings")
+                st.caption("Set custom attendance durations for each level in your department. Cannot exceed ICT maximums.")
+
+                _ict_settings = load_settings()
+                _ict_lec_max  = int(_ict_settings.get("lecture_lifetime",  60))
+                _ict_prac_max = int(_ict_settings.get("practical_lifetime", 120))
+
+                _adv_levels = sorted(get_levels(department, school))
+                if not _adv_levels:
+                    st.info("No levels configured for your department yet.")
+                else:
+                    _sel_adv_lvl = st.selectbox("Level", _adv_levels,
+                                                 format_func=lambda l: f"{l}L",
+                                                 key="adv_lt_level")
+                    _curr_lt = load_advisor_lifetime(school, department, _sel_adv_lvl)
+
+                    with st.form("adv_lt_form"):
+                        _alt1, _alt2 = st.columns(2)
+                        with _alt1:
+                            st.markdown(f"**📖 Lecture** (ICT max: {_ict_lec_max} min)")
+                            _adv_lec = st.number_input(
+                                "Duration (minutes)",
+                                min_value=5, max_value=_ict_lec_max, step=5,
+                                value=int(_curr_lt.get("lecture_lifetime", _ict_lec_max)),
+                                key="adv_lec_lt",
+                            )
+                        with _alt2:
+                            st.markdown(f"**🔬 Practical** (ICT max: {_ict_prac_max} min)")
+                            _adv_prac = st.number_input(
+                                "Duration (minutes)",
+                                min_value=5, max_value=_ict_prac_max, step=5,
+                                value=int(_curr_lt.get("practical_lifetime", _ict_prac_max)),
+                                key="adv_prac_lt",
+                            )
+                        _adv_lt_btn = st.form_submit_button("💾 Save", type="primary")
+
+                    if _adv_lt_btn:
+                        _new_lt = {
+                            "lecture_lifetime":   min(int(_adv_lec),  _ict_lec_max),
+                            "practical_lifetime": min(int(_adv_prac), _ict_prac_max),
+                            "set_by": adv["username"],
+                        }
+                        if save_advisor_lifetime(school, department, _sel_adv_lvl, _new_lt):
+                            st.success(f"Saved for Level {_sel_adv_lvl}L — "
+                                       f"Lecture: {_new_lt['lecture_lifetime']}min, "
+                                       f"Practical: {_new_lt['practical_lifetime']}min")
+                        else:
+                            st.error("GitHub write failed.")
 
                 st.divider()
                 st.markdown("### Co-Advisors in My Department")

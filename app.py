@@ -17,6 +17,9 @@ from core import (
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
     futo_now, futo_now_str, load_active_semester,
+    is_school_time, att_remaining_minutes, is_att_expired,
+    add_entry_v2, flag_concurrent_in_other_session,
+    session_to_csv_v2, build_csv_filename_v2,
 )
 from streamlit_cookies_manager import EncryptedCookieManager
 
@@ -118,6 +121,11 @@ DEFAULTS = {
     "takeover_confirmed": False,
     # Cascading dropdown values
     "dd_school": None, "dd_dept": None, "dd_level": None,
+    # Attendance type selection
+    "stu_att_type": None,       # "LECTURE" or "PRACTICAL"
+    "rep_att_type": "LECTURE",  # currently managing type
+    # Kill timer auto-push
+    "rep_kill_triggered": False,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -236,23 +244,76 @@ try:
             )
 
             if st.button("Check for Attendance →", type="primary"):
-                s, d, l = st.session_state.dd_school, st.session_state.dd_dept, st.session_state.dd_level
+                s, d, l = (st.session_state.dd_school,
+                            st.session_state.dd_dept,
+                            st.session_state.dd_level)
                 if not all([s, d, l]):
                     st.error("Please select your school, department and level.")
                 else:
                     with st.spinner("Checking for active attendance..."):
-                        session, _ = load_session(s, d, l)
-                    if not session:
-                        st.warning("No attendance is currently running for your level. Check with your course rep.")
+                        lec_sess,  _ = load_session(s, d, l, att_type="LECTURE")
+                        prac_sess, _ = load_session(s, d, l, att_type="PRACTICAL")
+                    active_types = []
+                    if lec_sess:  active_types.append("LECTURE")
+                    if prac_sess: active_types.append("PRACTICAL")
+
+                    if not active_types:
+                        st.warning("No attendance is currently running for your level.")
+                    elif len(active_types) == 1:
+                        _the_sess = lec_sess if active_types[0] == "LECTURE" else prac_sess
+                        st.session_state.stu_school   = s
+                        st.session_state.stu_dept     = d
+                        st.session_state.stu_level    = l
+                        st.session_state.stu_session  = _the_sess
+                        st.session_state.stu_att_type = active_types[0]
+                        st.session_state.stu_stage    = "code"
+                        st.rerun()
                     else:
-                        st.session_state.stu_school  = s
-                        st.session_state.stu_dept    = d
-                        st.session_state.stu_level   = l
-                        st.session_state.stu_session = session
-                        st.session_state.stu_stage   = "code"
+                        st.session_state.stu_school = s
+                        st.session_state.stu_dept   = d
+                        st.session_state.stu_level  = l
+                        st.session_state.stu_stage  = "pick_type"
                         st.rerun()
 
-        # ── STAGE: code ───────────────────────────────────────────────────────────
+        # ── STAGE: pick_type — both LECTURE and PRACTICAL active ────────────────
+        elif st.session_state.stu_stage == "pick_type":
+            st.markdown("### Which attendance would you like to sign?")
+            st.markdown("Both a **Lecture** and a **Practical** attendance are currently running for your level.")
+            _pc1, _pc2 = st.columns(2)
+            with _pc1:
+                if st.button("📖 Lecture Attendance", use_container_width=True, type="primary"):
+                    with st.spinner("Loading..."):
+                        _sess, _ = load_session(
+                            st.session_state.stu_school,
+                            st.session_state.stu_dept,
+                            st.session_state.stu_level,
+                            att_type="LECTURE"
+                        )
+                    if _sess:
+                        st.session_state.stu_session  = _sess
+                        st.session_state.stu_att_type = "LECTURE"
+                        st.session_state.stu_stage    = "code"
+                        st.rerun()
+                    else:
+                        st.error("Lecture attendance has ended. Please refresh.")
+            with _pc2:
+                if st.button("🔬 Practical Attendance", use_container_width=True):
+                    with st.spinner("Loading..."):
+                        _sess, _ = load_session(
+                            st.session_state.stu_school,
+                            st.session_state.stu_dept,
+                            st.session_state.stu_level,
+                            att_type="PRACTICAL"
+                        )
+                    if _sess:
+                        st.session_state.stu_session  = _sess
+                        st.session_state.stu_att_type = "PRACTICAL"
+                        st.session_state.stu_stage    = "code"
+                        st.rerun()
+                    else:
+                        st.error("Practical attendance has ended. Please refresh.")
+
+                # ── STAGE: code ───────────────────────────────────────────────────────────
         elif st.session_state.stu_stage == "code":
             sess     = st.session_state.stu_session
             lifetime = load_settings().get("TOKEN_LIFETIME", 7)
@@ -358,27 +419,38 @@ try:
                             if not allowed:
                                 st.error(dmsg)
                             else:
-                                ok, msg = add_entry(current, surname, other_names, matric)
+                                _att_type = st.session_state.get("stu_att_type","LECTURE")
+                                ok, msg, _is_late, _is_conc = add_entry_v2(
+                                    current, surname, other_names, matric,
+                                    st.session_state.stu_school,
+                                    st.session_state.stu_dept,
+                                    st.session_state.stu_level,
+                                )
                                 if ok:
-                                    # Write cookie FIRST, before rerun, wrapped in
-                                    # try/except — cookie manager can throw on some
-                                    # mobile browsers mid-render cycle.
+                                    # If concurrent, flag the other session too
+                                    if _is_conc:
+                                        flag_concurrent_in_other_session(
+                                            st.session_state.stu_school,
+                                            st.session_state.stu_dept,
+                                            st.session_state.stu_level,
+                                            matric, _att_type,
+                                        )
+                                    # Write cookie before rerun
                                     try:
                                         _cookies[_ck_key] = matric.strip()
                                         _cookies.save()
                                     except Exception:
                                         pass
-                                    # Session-state fallback guard (same browser session)
                                     st.session_state[f"_signed_{_ck_key}"] = True
-
                                     new_sha = save_session(
                                         st.session_state.stu_school, st.session_state.stu_dept,
                                         st.session_state.stu_level, current, sha,
+                                        att_type=_att_type,
                                     )
-                                    # Whether or not save_session succeeded, show done —
-                                    # the entry is already in the in-memory dict.
-                                    st.session_state.stu_session = current
-                                    st.session_state.stu_stage   = "done"
+                                    st.session_state.stu_session    = current
+                                    st.session_state.stu_stage      = "done"
+                                    st.session_state.stu_is_late    = _is_late
+                                    st.session_state.stu_is_conc    = _is_conc
                                     st.rerun()
                                 else:
                                     st.error(msg)
@@ -387,6 +459,7 @@ try:
         elif st.session_state.stu_stage == "done":
             sess = st.session_state.stu_session
             last = sess["entries"][-1] if sess["entries"] else {}
+            _att_label = st.session_state.get("stu_att_type", "LECTURE").title()
             st.markdown(f"""
             <div class="success-box">
                 <div class="tick">✅</div>
@@ -398,9 +471,25 @@ try:
             </div>
             <div class="info-card" style="margin-top:1rem">
                 <b>Course:</b> {sess['course_code']} &nbsp;|&nbsp;
+                <b>Type:</b> {_att_label} &nbsp;|&nbsp;
                 <b>Dept:</b> {sess['department']} &nbsp;|&nbsp;
                 <b>Level:</b> {sess['level']}L
             </div>""", unsafe_allow_html=True)
+
+            # ── Late warning ──────────────────────────────────────────────────────
+            if st.session_state.get("stu_is_late"):
+                st.warning("⏰ **You have been marked as late.** Your entry was recorded after the attendance window closed. This will be visible to your advisor.")
+
+            # ── Concurrent signing warning ────────────────────────────────────────
+            if st.session_state.get("stu_is_conc"):
+                st.error(
+                    "🔀 **Concurrent Attendance Detected.**\n\n"
+                    "You have been flagged for signing both a Lecture and a Practical "
+                    "attendance at the same time. This flag has been recorded and your "
+                    "advisor has been notified through the attendance export.\n\n"
+                    "If this was a mistake, please speak to your advisor as soon as "
+                    "possible to have your record reviewed."
+                )
 
         st.stop()
 
@@ -457,8 +546,24 @@ try:
         # This prevents the forced-logout race condition caused by re-fetching
         # immediately after start_session writes to GitHub.
         if not st.session_state.rep_session_loaded:
+            # Load whichever type was last active (try both, prefer LECTURE)
             with st.spinner("Loading session..."):
-                session, sha = load_session(rep["school"], rep["department"], rep["level"])
+                _lec_s, _lec_sha  = load_session(rep["school"], rep["department"],
+                                                  rep["level"], att_type="LECTURE")
+                _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
+                                                   rep["level"], att_type="PRACTICAL")
+            # Use whichever is active; prefer most recently started
+            if _lec_s and _prac_s:
+                session = _lec_s; sha = _lec_sha
+                st.session_state.rep_att_type = "LECTURE"
+            elif _lec_s:
+                session = _lec_s; sha = _lec_sha
+                st.session_state.rep_att_type = "LECTURE"
+            elif _prac_s:
+                session = _prac_s; sha = _prac_sha
+                st.session_state.rep_att_type = "PRACTICAL"
+            else:
+                session = None; sha = None
             st.session_state.rep_session        = session
             st.session_state.rep_session_sha    = sha
             st.session_state.rep_session_loaded = True
@@ -507,25 +612,55 @@ try:
 
         # ── No active session — start one + show history ─────────────────────────
         if not session:
-            st.markdown("### ▶ Start New Attendance")
-            with st.form("start_att"):
-                course_code = st.text_input("Course Code", placeholder="e.g. CSC301")
-                start_btn   = st.form_submit_button("Start Attendance", type="primary")
-            if start_btn:
-                _sem_rep = load_active_semester()
-                if not _sem_rep:
-                    st.error("🔒 No active semester. ICT must start a semester before attendance can be taken.")
-                elif not course_code.strip():
-                    st.error("Please enter a course code.")
+            # School day/time gate for rep too
+            _rep_time_ok, _rep_time_msg = is_school_time()
+            if not _rep_time_ok:
+                st.markdown(f"""<div class="info-card" style="text-align:center;padding:1.5rem">
+                    <div style="font-size:2rem">🕐</div>
+                    <b>Outside School Hours</b><br>
+                    <span style="opacity:0.75">{_rep_time_msg}</span>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown("### ▶ Start New Attendance")
+
+                # Check which types are already running
+                _lec_running  = bool(load_session(rep["school"], rep["department"], rep["level"], att_type="LECTURE")[0])
+                _prac_running = bool(load_session(rep["school"], rep["department"], rep["level"], att_type="PRACTICAL")[0])
+
+                if _lec_running and _prac_running:
+                    st.info("Both a Lecture and Practical attendance are already running. End one before starting another of the same type.")
                 else:
-                    with st.spinner("Starting..."):
-                        session, sha = start_session(
-                            rep["school"], rep["department"], rep["level"],
-                            course_code, rep["username"],
+                    with st.form("start_att"):
+                        course_code = st.text_input("Course Code", placeholder="e.g. CSC301")
+                        # Only show types not already running
+                        _avail_types = []
+                        if not _lec_running:  _avail_types.append("LECTURE")
+                        if not _prac_running: _avail_types.append("PRACTICAL")
+                        att_type_sel = st.radio(
+                            "Attendance Type", _avail_types,
+                            horizontal=True,
+                            help="LECTURE and PRACTICAL can run concurrently but not two of the same type."
                         )
-                    st.session_state.rep_session     = session
-                    st.session_state.rep_session_sha = sha
-                    st.rerun()
+                        start_btn = st.form_submit_button("▶ Start Attendance", type="primary")
+
+                    if start_btn:
+                        _sem_rep = load_active_semester()
+                        if not _sem_rep:
+                            st.error("🔒 No active semester. ICT must start a semester before attendance can be taken.")
+                        elif not course_code.strip():
+                            st.error("Please enter a course code.")
+                        else:
+                            with st.spinner("Starting..."):
+                                session, sha = start_session(
+                                    rep["school"], rep["department"], rep["level"],
+                                    course_code, rep["username"],
+                                    att_type=att_type_sel,
+                                )
+                            st.session_state.rep_session     = session
+                            st.session_state.rep_session_sha = sha
+                            st.session_state.rep_att_type    = att_type_sel
+                            st.session_state.rep_kill_triggered = False
+                            st.rerun()
 
             # ── Session History ───────────────────────────────────────────────
             st.divider()
@@ -541,31 +676,74 @@ try:
                 st.caption(f"Showing last {len(history)} session(s). Only successfully pushed sessions are recorded.")
             st.stop()
 
-        # ── Refresh token if due ──────────────────────────────────────────────────
-        lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-        session, refreshed = refresh_token(session, lifetime)
+        # ── Token refresh ─────────────────────────────────────────────────────────
+        _tok_lifetime = load_settings().get("TOKEN_LIFETIME", 7)
+        session, refreshed = refresh_token(session, _tok_lifetime)
         if refreshed:
-            sha = save_session(rep["school"], rep["department"], rep["level"], session, sha)
+            _att_t = session.get("att_type", "LECTURE")
+            sha = save_session(rep["school"], rep["department"], rep["level"],
+                               session, sha, att_type=_att_t)
             st.session_state.rep_session     = session
             st.session_state.rep_session_sha = sha
 
-        remaining = token_remaining(session, lifetime)
+        _tok_remaining = token_remaining(session, _tok_lifetime)
+        _att_type_disp = session.get("att_type", "LECTURE")
+        _att_remaining = att_remaining_minutes(session)
+        _att_lifetime  = session.get("lifetime_minutes", 60)
+        _att_action    = session.get("action", "flag")
+        _att_expired   = _att_remaining <= 0
+
+        # ── Kill: auto-push when timer expires ────────────────────────────────────
+        if _att_expired and _att_action == "kill" and not st.session_state.rep_kill_triggered:
+            st.session_state.rep_kill_triggered = True
+            with st.spinner("⏱ Time's up! Auto-submitting attendance…"):
+                _ok_k, _msg_k = push_attendance_to_lava(session)
+                if _ok_k:
+                    delete_session(rep["school"], rep["department"], rep["level"],
+                                   att_type=_att_type_disp)
+                    st.session_state.rep_session        = None
+                    st.session_state.rep_session_sha    = None
+                    st.session_state.rep_session_loaded = True
+                    st.session_state.rep_kill_triggered = False
+            st.success(f"✅ Attendance automatically submitted and saved to LAVA. ({_msg_k})")
+            st.stop()
+
+        # ── Session header ────────────────────────────────────────────────────────
+        _type_icon = "📖" if _att_type_disp == "LECTURE" else "🔬"
+        st.markdown(f"### 🟢 Active — {session['course_code']} &nbsp; {_type_icon} {_att_type_disp.title()}")
 
         # ── Token display ─────────────────────────────────────────────────────────
-        st.markdown(f"### 🟢 Active — {session['course_code']}")
         st.markdown(f"""
         <div class="token-display">
             <div class="code">{session['token']}</div>
             <div class="label">Attendance Code — share this with students verbally</div>
         </div>""", unsafe_allow_html=True)
+        st.progress(max(0.0, _tok_remaining / _tok_lifetime))
+        st.caption(f"⏱ Code refreshes in **{_tok_remaining:.0f}s**")
 
-        st.progress(remaining / lifetime)
-        st.caption(
-            f"⏱ Code refreshes in **{remaining:.0f}s** · "
-            f"rotates every {lifetime}s · "
-            f"Started {session['started_at'][11:16]} · "
-            f"{len(session['entries'])} entries"
-        )
+        # ── Attendance lifetime countdown ─────────────────────────────────────────
+        if _att_expired:
+            if _att_action == "flag":
+                st.warning(
+                    f"⏰ Attendance window has closed ({_att_lifetime} min). "
+                    f"The session is still open — all new entries are now marked **Late**."
+                )
+            # kill case handled above by auto-push
+        else:
+            _mins_left = int(_att_remaining)
+            _secs_left = int((_att_remaining - _mins_left) * 60)
+            _pct       = max(0.0, _att_remaining / _att_lifetime)
+            _bar_color = "#27ae60" if _pct > 0.5 else "#f39c12" if _pct > 0.2 else "#e74c3c"
+            st.markdown(
+                f"<div style='font-size:0.88rem;opacity:0.8;margin-bottom:0.3rem'>"
+                f"⏳ Attendance window: <b>{_mins_left}m {_secs_left:02d}s</b> remaining "
+                f"({'Flag late entries' if _att_action=='flag' else '⚡ Auto-submit when done'})"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            st.progress(_pct)
+
+        st.caption(f"Started {session['started_at'][11:16]} · {len(session['entries'])} entries")
 
         st.divider()
 
@@ -683,11 +861,13 @@ try:
                 if final:
                     ok, pmsg = push_attendance_to_lava(final)
                     if ok:
-                        delete_session(rep["school"], rep["department"], rep["level"])
+                        delete_session(rep["school"], rep["department"], rep["level"],
+                                          att_type=session.get("att_type","LECTURE"))
                         st.session_state.rep_session        = None
                         st.session_state.rep_session_sha    = None
                         st.session_state.rep_session_loaded = True
                         st.session_state.takeover_confirmed = False
+                        st.session_state.rep_kill_triggered = False
                         st.success("✅ Attendance pushed to LAVA successfully!")
                         st.balloons()
                         time.sleep(2)

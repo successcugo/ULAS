@@ -38,9 +38,10 @@ def futo_ts() -> float:
 USERS_PATH    = "data/users.json"
 SETTINGS_PATH = "data/settings.json"
 
-def _session_path(school: str, department: str, level: str) -> str:
+def _session_path(school: str, department: str, level: str,
+                  att_type: str = "LECTURE") -> str:
     safe = lambda s: s.replace("/","_").replace(" ","_").replace("(","").replace(")","")
-    return f"sessions/{safe(school)}__{safe(department)}__{level}.json"
+    return f"sessions/{safe(school)}__{safe(department)}__{level}_{att_type}.json"
 
 def _device_map_path(school: str, department: str, level: str, course_code: str) -> str:
     safe = lambda s: s.replace("/","_").replace(" ","_").replace("(","").replace(")","")
@@ -59,6 +60,15 @@ def verify_password(pw: str, hashed: str) -> bool:
 DEFAULT_SETTINGS = {
     "TOKEN_LIFETIME": 7,
     "dept_abbreviations": {},       # {"Department Name": "ABC", ...}
+    # ── School day / time gate ──────────────────────────────────────────────
+    "school_days":  [1, 2, 3, 4, 5],   # 1=Mon … 7=Sun
+    "school_start": "08:30",            # WAT (UTC+1)
+    "school_end":   "18:30",
+    # ── Attendance lifetime ─────────────────────────────────────────────────
+    "lecture_lifetime":   60,           # minutes (ICT max)
+    "lecture_action":     "flag",       # "flag" or "kill"
+    "practical_lifetime": 120,          # minutes (ICT max)
+    "practical_action":   "flag",
 }
 
 def load_settings() -> dict:
@@ -164,8 +174,9 @@ def generate_token() -> str:
 
 
 # ── Active Sessions ───────────────────────────────────────────────────────────
-def load_session(school: str, department: str, level: str) -> tuple[dict | None, str | None]:
-    path = _session_path(school, department, level)
+def load_session(school: str, department: str, level: str,
+                  att_type: str = "LECTURE") -> tuple[dict | None, str | None]:
+    path = _session_path(school, department, level, att_type)
     data, sha = read_json(path)
     return data, sha
 
@@ -174,21 +185,30 @@ def load_session(school: str, department: str, level: str) -> tuple[dict | None,
 
 
 def save_session(school: str, department: str, level: str,
-                 session: dict, sha: str | None = None) -> str | None:
-    path = _session_path(school, department, level)
+                 session: dict, sha: str | None = None,
+                 att_type: str = "LECTURE") -> str | None:
+    path = _session_path(school, department, level, att_type)
     return write_json(
         path, session,
         f"Session update: {session.get('course_code','?')} {department} L{level}",
         sha,
     )
 
-def delete_session(school: str, department: str, level: str) -> bool:
-    path = _session_path(school, department, level)
-    return delete_file(path, f"End session: {department} L{level}")
+def delete_session(school: str, department: str, level: str,
+                   att_type: str = "LECTURE") -> bool:
+    path = _session_path(school, department, level, att_type)
+    return delete_file(path, f"End session: {department} L{level} {att_type}")
 
 def start_session(school: str, department: str, level: str,
-                  course_code: str, rep_username: str) -> tuple[dict, str | None]:
-    now = futo_now()
+                  course_code: str, rep_username: str,
+                  att_type: str = "LECTURE") -> tuple[dict, str | None]:
+    """
+    att_type: "LECTURE" or "PRACTICAL"
+    Lifetime and action are resolved from advisor override → ICT default.
+    """
+    now      = futo_now()
+    settings = load_settings()
+    lifetime, action = resolve_att_lifetime(school, department, level, att_type, settings)
     session = {
         "school":              school,
         "department":          department,
@@ -196,12 +216,15 @@ def start_session(school: str, department: str, level: str,
         "course_code":         course_code.upper().strip(),
         "rep_username":        rep_username,
         "started_at":          now.isoformat(),
+        "att_type":            att_type,           # "LECTURE" or "PRACTICAL"
+        "lifetime_minutes":    lifetime,
+        "action":              action,              # "flag" or "kill"
         "token":               generate_token(),
         "token_generated_at":  futo_ts(),
         "entries":             [],
         "next_sn":             1,
     }
-    sha = save_session(school, department, level, session)
+    sha = save_session(school, department, level, session, att_type=att_type)
     return session, sha
 
 def refresh_token(session: dict, lifetime: int) -> tuple[dict, bool]:
@@ -729,3 +752,262 @@ def get_dept_students(school: str, department: str) -> list[dict]:
         pass
 
     return sorted(students.values(), key=lambda s: (s["level"], s["surname"]))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── School Day / Time Gate ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WAT_OFFSET = 1   # UTC+1
+
+def is_school_time() -> tuple[bool, str]:
+    """
+    Returns (allowed, reason_if_blocked).
+    Checks current WAT time against school_days and school_start/end in settings.
+    """
+    import datetime as _dt
+    settings    = load_settings()
+    now_utc     = _dt.datetime.utcnow()
+    now_wat     = now_utc + _dt.timedelta(hours=WAT_OFFSET)
+    dow         = now_wat.isoweekday()   # 1=Mon, 7=Sun
+    school_days = settings.get("school_days", [1,2,3,4,5])
+    start_str   = settings.get("school_start", "08:30")
+    end_str     = settings.get("school_end",   "18:30")
+
+    day_names   = {1:"Monday",2:"Tuesday",3:"Wednesday",4:"Thursday",
+                   5:"Friday",6:"Saturday",7:"Sunday"}
+    allowed_day_names = ", ".join(day_names[d] for d in sorted(school_days))
+
+    if dow not in school_days:
+        return False, (
+            f"Today is {day_names[dow]}. Attendance is only available on school days "
+            f"({allowed_day_names})."
+        )
+
+    sh, sm  = map(int, start_str.split(":"))
+    eh, em  = map(int, end_str.split(":"))
+    t       = now_wat.time()
+    start_t = _dt.time(sh, sm)
+    end_t   = _dt.time(eh, em)
+
+    if t < start_t:
+        return False, (
+            f"Attendance opens at {start_str} WAT. "
+            f"Current time is {t.strftime('%H:%M')} WAT."
+        )
+    if t > end_t:
+        return False, (
+            f"Attendance closed at {end_str} WAT. "
+            f"Current time is {t.strftime('%H:%M')} WAT."
+        )
+
+    return True, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Advisor Lifetime Overrides ────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _adv_lifetime_path(school: str, department: str, level: str) -> str:
+    safe = lambda s: s.replace("/","_").replace(" ","_").replace("(","").replace(")","")
+    return f"settings/advisor_lifetimes/{safe(school)}/{safe(department)}/{level}.json"
+
+
+def load_advisor_lifetime(school: str, department: str, level: str) -> dict:
+    data, _ = read_json(_adv_lifetime_path(school, department, level))
+    return data or {}
+
+
+def save_advisor_lifetime(school: str, department: str, level: str,
+                          data: dict) -> bool:
+    return bool(write_json(
+        _adv_lifetime_path(school, department, level),
+        data, f"Advisor lifetime: {department} L{level}"
+    ))
+
+
+def resolve_att_lifetime(school: str, department: str, level: str,
+                         att_type: str, settings: dict | None = None) -> tuple[int, str]:
+    """
+    Returns (lifetime_minutes, action) for att_type ("LECTURE" or "PRACTICAL").
+    Priority: advisor override → ICT setting.
+    """
+    if settings is None:
+        settings = load_settings()
+    key      = att_type.lower()                          # "lecture" or "practical"
+    ict_lt   = int(settings.get(f"{key}_lifetime",  60 if key=="lecture" else 120))
+    ict_act  = settings.get(f"{key}_action", "flag")
+    overrides = load_advisor_lifetime(school, department, level)
+    adv_lt   = overrides.get(f"{key}_lifetime")
+    if adv_lt is not None:
+        lt = min(int(adv_lt), ict_lt)   # cannot exceed ICT max
+    else:
+        lt = ict_lt
+    return lt, ict_act
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Attendance Lifetime Helpers ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def att_elapsed_minutes(session: dict) -> float:
+    """Minutes elapsed since session started."""
+    from datetime import datetime as _datetime
+    started = _datetime.fromisoformat(session["started_at"])
+    now_utc = _datetime.utcnow()
+    # started_at is in WAT (UTC+1), convert for comparison
+    from datetime import timezone, timedelta
+    WAT = timezone(timedelta(hours=WAT_OFFSET))
+    now_wat = _datetime.now(WAT).replace(tzinfo=None)
+    started_naive = started if started.tzinfo is None else started.replace(tzinfo=None)
+    return (now_wat - started_naive).total_seconds() / 60
+
+
+def att_remaining_minutes(session: dict) -> float:
+    """Minutes remaining before lifetime expires. Negative = expired."""
+    return session.get("lifetime_minutes", 60) - att_elapsed_minutes(session)
+
+
+def is_att_expired(session: dict) -> bool:
+    return att_remaining_minutes(session) <= 0
+
+
+def is_entry_late(session: dict) -> bool:
+    """True if the session lifetime has expired (entry is late)."""
+    return is_att_expired(session)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Concurrent Signing Detection ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def check_concurrent_signing(school: str, department: str, level: str,
+                              matric: str, signing_type: str) -> bool:
+    """
+    Returns True if the student has already signed the OTHER att_type
+    within its active lifetime window (concurrent signing).
+    """
+    other_type = "PRACTICAL" if signing_type == "LECTURE" else "LECTURE"
+    other_sess, _ = load_session(school, department, level, att_type=other_type)
+    if not other_sess:
+        return False
+    # Check if matric is already in the other session's entries
+    entries = other_sess.get("entries", [])
+    if not any(e.get("matric") == matric for e in entries):
+        return False
+    # Check if other session is still within its lifetime
+    return not is_att_expired(other_sess)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Updated add_entry ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def add_entry_v2(session: dict, surname: str, other_names: str, matric: str,
+                 school: str = "", department: str = "", level: str = ""
+                 ) -> tuple[bool, str, bool, bool]:
+    """
+    Extended add_entry.
+    Returns: (ok, message, is_late, is_concurrent)
+      is_late       — entry added after lifetime expired (action=flag)
+      is_concurrent — student already signed the other att_type this session
+    Appends late: bool and concurrent: bool to the entry dict.
+    """
+    if _name_dup(session["entries"], surname, other_names):
+        return False, "A student with this name is already in the attendance.", False, False
+    if _matric_dup(session["entries"], matric):
+        return False, "This matric number is already in the attendance.", False, False
+
+    late       = is_entry_late(session)
+    concurrent = False
+    if school and department and level:
+        concurrent = check_concurrent_signing(school, department, level,
+                                              matric, session.get("att_type","LECTURE"))
+
+    entry = {
+        "sn":          session["next_sn"],
+        "surname":     surname.strip().upper(),
+        "other_names": other_names.strip().title(),
+        "matric":      matric.strip(),
+        "time":        futo_now_str(),
+        "late":        late,
+        "concurrent":  concurrent,
+    }
+    session["entries"].append(entry)
+    session["next_sn"] += 1
+
+    msg = "Entry recorded."
+    if late:
+        msg = "Entry recorded. ⏰ Marked as late."
+    return True, msg, late, concurrent
+
+
+def flag_concurrent_in_other_session(school: str, department: str,
+                                     level: str, matric: str,
+                                     signing_type: str) -> None:
+    """
+    When concurrent signing is detected, also flag the entry in the OTHER
+    session so both records carry the concurrent flag.
+    """
+    other_type = "PRACTICAL" if signing_type == "LECTURE" else "LECTURE"
+    other_sess, other_sha = load_session(school, department, level, att_type=other_type)
+    if not other_sess:
+        return
+    changed = False
+    for e in other_sess.get("entries", []):
+        if e.get("matric") == matric and not e.get("concurrent"):
+            e["concurrent"] = True
+            changed = True
+    if changed:
+        save_session(school, department, level, other_sess,
+                     other_sha, att_type=other_type)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Updated session_to_csv ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def session_to_csv_v2(session: dict) -> str:
+    """Extended CSV with Late and Concurrent columns."""
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["S/N", "Surname", "Other Names", "Matric Number",
+                    "Time", "Session Started", "Status"],
+    )
+    writer.writeheader()
+    for e in session["entries"]:
+        flags = []
+        if e.get("late"):        flags.append("⏰ Late")
+        if e.get("concurrent"):  flags.append("🔀 Concurrent")
+        writer.writerow({
+            "S/N":             e["sn"],
+            "Surname":         e["surname"],
+            "Other Names":     e["other_names"],
+            "Matric Number":   e["matric"],
+            "Time":            e["time"],
+            "Session Started": datetime.fromisoformat(session["started_at"]).strftime("%H:%M:%S"),
+            "Status":          ", ".join(flags) if flags else "✓",
+        })
+    return output.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── build_csv_filename_v2 — includes att_type ─────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_csv_filename_v2(session: dict) -> str:
+    """
+    Format: {SCHOOLABBR}{DEPTABBR}{LEVEL}_{SESSION}+{SEMESTER}_{COURSE}_{TYPE}_{DATE}.csv
+    """
+    school_abbr = get_school_abbr(session["school"])
+    dept_abbr   = get_dept_abbreviation(session["department"])
+    level       = session["level"]
+    att_type    = session.get("att_type", "LECTURE")
+    sem         = load_active_semester() or {}
+    started     = datetime.fromisoformat(session["started_at"])
+    date_str    = started.strftime("%Y-%m-%d")
+    sem_session = sem.get("session", "Unknown").replace("/", "-")
+    sem_name    = sem.get("name",    "Unknown").replace(" ", "")
+    course      = session["course_code"].replace(" ", "")
+    return (f"{school_abbr}{dept_abbr}{level}_"
+            f"{sem_session}+{sem_name}_{course}_{att_type}_{date_str}.csv")

@@ -24,7 +24,7 @@ from core import (
     lava_sem_path, get_available_sessions, get_semesters_for_session,
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
-    load_settings, save_settings, get_schools, get_departments, get_levels,
+    load_settings, save_settings,
     load_advisor_lifetime, save_advisor_lifetime,
     get_all_advisors, load_settings, save_settings, hash_password,
     verify_password, futo_now_str, get_dept_abbreviation, set_dept_abbreviation,

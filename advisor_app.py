@@ -762,7 +762,7 @@ try:
                 do_logout()
                 st.rerun()
 
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "🎓 GPA Management", "📈 Dept Stats", "🔧 My Account"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "🎓 GPA Management", "📈 Dept Stats"])
 
         # ── TAB 1 — Course Reps ───────────────────────────────────────────────────
         with tab1:
@@ -905,6 +905,59 @@ try:
                     st.session_state.adv_user["password_hash"] = hash_password(my_new)
                     invalidate_cache("__users")
                     st.success("Password updated.")
+
+
+
+            st.divider()
+            # ── Attendance Lifetime Overrides (per level) ─────────────────────
+            st.markdown("### ⏱ Attendance Lifetime Settings")
+            st.caption("Set custom attendance durations for each level in your department. Cannot exceed ICT maximums.")
+
+            _ict_settings = load_settings()
+            _ict_lec_max  = int(_ict_settings.get("lecture_lifetime",  60))
+            _ict_prac_max = int(_ict_settings.get("practical_lifetime", 120))
+
+            _adv_levels = sorted(get_levels(department, school))
+            if not _adv_levels:
+                st.info("No levels configured for your department yet.")
+            else:
+                _sel_adv_lvl = st.selectbox("Level", _adv_levels,
+                                             format_func=lambda l: f"{l}L",
+                                             key="adv_lt_level")
+                _curr_lt = load_advisor_lifetime(school, department, _sel_adv_lvl)
+
+                with st.form("adv_lt_form"):
+                    _alt1, _alt2 = st.columns(2)
+                    with _alt1:
+                        st.markdown(f"**📖 Lecture** (ICT max: {_ict_lec_max} min)")
+                        _adv_lec = st.number_input(
+                            "Duration (minutes)",
+                            min_value=5, max_value=_ict_lec_max, step=5,
+                            value=int(_curr_lt.get("lecture_lifetime", _ict_lec_max)),
+                            key="adv_lec_lt",
+                        )
+                    with _alt2:
+                        st.markdown(f"**🔬 Practical** (ICT max: {_ict_prac_max} min)")
+                        _adv_prac = st.number_input(
+                            "Duration (minutes)",
+                            min_value=5, max_value=_ict_prac_max, step=5,
+                            value=int(_curr_lt.get("practical_lifetime", _ict_prac_max)),
+                            key="adv_prac_lt",
+                        )
+                    _adv_lt_btn = st.form_submit_button("💾 Save", type="primary")
+
+                if _adv_lt_btn:
+                    _new_lt = {
+                        "lecture_lifetime":   min(int(_adv_lec),  _ict_lec_max),
+                        "practical_lifetime": min(int(_adv_prac), _ict_prac_max),
+                        "set_by": adv["username"],
+                    }
+                    if save_advisor_lifetime(school, department, _sel_adv_lvl, _new_lt):
+                        st.success(f"Saved for Level {_sel_adv_lvl}L — "
+                                   f"Lecture: {_new_lt['lecture_lifetime']}min, "
+                                   f"Practical: {_new_lt['practical_lifetime']}min")
+                    else:
+                        st.error("GitHub write failed.")
 
         # ── TAB 3 — Department Abbreviation ──────────────────────────────────────
         with tab3:
@@ -2524,93 +2577,6 @@ try:
                 except Exception as e:
                     st.error(f"Export failed: {e}")
 
-
-        # ── TAB 7 — My Account ────────────────────────────────────────────────────
-        with tab7:
-            try:
-                st.markdown("### My Account")
-                st.markdown(f"""<div class="info-card">
-                    <b>Username:</b> {adv['username']}<br>
-                    <b>School:</b> {adv.get('school','—')}<br>
-                    <b>Department:</b> {adv.get('department','—')}<br>
-                    <b>Account created:</b> {adv.get('created_at','—')}<br>
-                    <b>Created by:</b> {adv.get('created_by','—')}
-                </div>""", unsafe_allow_html=True)
-
-                st.divider()
-
-                # ── Attendance Lifetime Overrides (per level) ─────────────────────
-                st.markdown("### ⏱ Attendance Lifetime Settings")
-                st.caption("Set custom attendance durations for each level in your department. Cannot exceed ICT maximums.")
-
-                _ict_settings = load_settings()
-                _ict_lec_max  = int(_ict_settings.get("lecture_lifetime",  60))
-                _ict_prac_max = int(_ict_settings.get("practical_lifetime", 120))
-
-                _adv_levels = sorted(get_levels(department, school))
-                if not _adv_levels:
-                    st.info("No levels configured for your department yet.")
-                else:
-                    _sel_adv_lvl = st.selectbox("Level", _adv_levels,
-                                                 format_func=lambda l: f"{l}L",
-                                                 key="adv_lt_level")
-                    _curr_lt = load_advisor_lifetime(school, department, _sel_adv_lvl)
-
-                    with st.form("adv_lt_form"):
-                        _alt1, _alt2 = st.columns(2)
-                        with _alt1:
-                            st.markdown(f"**📖 Lecture** (ICT max: {_ict_lec_max} min)")
-                            _adv_lec = st.number_input(
-                                "Duration (minutes)",
-                                min_value=5, max_value=_ict_lec_max, step=5,
-                                value=int(_curr_lt.get("lecture_lifetime", _ict_lec_max)),
-                                key="adv_lec_lt",
-                            )
-                        with _alt2:
-                            st.markdown(f"**🔬 Practical** (ICT max: {_ict_prac_max} min)")
-                            _adv_prac = st.number_input(
-                                "Duration (minutes)",
-                                min_value=5, max_value=_ict_prac_max, step=5,
-                                value=int(_curr_lt.get("practical_lifetime", _ict_prac_max)),
-                                key="adv_prac_lt",
-                            )
-                        _adv_lt_btn = st.form_submit_button("💾 Save", type="primary")
-
-                    if _adv_lt_btn:
-                        _new_lt = {
-                            "lecture_lifetime":   min(int(_adv_lec),  _ict_lec_max),
-                            "practical_lifetime": min(int(_adv_prac), _ict_prac_max),
-                            "set_by": adv["username"],
-                        }
-                        if save_advisor_lifetime(school, department, _sel_adv_lvl, _new_lt):
-                            st.success(f"Saved for Level {_sel_adv_lvl}L — "
-                                       f"Lecture: {_new_lt['lecture_lifetime']}min, "
-                                       f"Practical: {_new_lt['practical_lifetime']}min")
-                        else:
-                            st.error("GitHub write failed.")
-
-                st.divider()
-                st.markdown("### Co-Advisors in My Department")
-                invalidate_cache("__users")
-                co_advs = get_advisors_for_dept(school, department)
-                if len(co_advs) <= 1:
-                    st.info("You are the only advisor for this department.")
-                else:
-                    for a in co_advs:
-                        if a["username"] != adv["username"]:
-                            st.markdown(f"""<div class="adv-card">
-                                <span class="badge-adv">Advisor</span>
-                                &nbsp;&nbsp;<b>{a['username']}</b>
-                                &nbsp;·&nbsp; Created {a.get('created_at','')[:10]}
-                            </div>""", unsafe_allow_html=True)
-
-                st.divider()
-                st.caption(
-                    "To create or delete advisor accounts, or to manage settings, "
-                    "contact ICT administration."
-                )
-            except Exception as _tab6_err:
-                st.error(f"My Account error: {_tab6_err}")
 
 
 except Exception as _err:

@@ -899,97 +899,105 @@ try:
                     st.rerun()
             st.stop()
 
-        # ── No active session — start one + show history ─────────────────────────
-        if not session:
-            # School day/time gate for rep too
-            _rep_time_ok, _rep_time_msg = is_school_time()
-            if not _rep_time_ok:
-                st.markdown(f"""<div class="info-card" style="text-align:center;padding:1.5rem">
-                    <div style="font-size:2rem">🕐</div>
-                    <b>Outside School Hours</b><br>
-                    <span style="opacity:0.75">{_rep_time_msg}</span>
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown("### ▶ Start New Attendance")
+        # ── Rep tabs: Sessions | Start ────────────────────────────────────────────
+        rep_tab1, rep_tab2 = st.tabs(["📋 Sessions", "▶ Start Attendance"])
 
-                # Check which types are already running
-                _lec_running  = bool(load_session(rep["school"], rep["department"], rep["level"], att_type="LECTURE")[0])
-                _prac_running = bool(load_session(rep["school"], rep["department"], rep["level"], att_type="PRACTICAL")[0])
+        with rep_tab1:
+            # ── Active session display — one or both types ─────────────────────
+            # ── Active session display — one or both types ───────────────────────────
+            _lec_s,  _lec_sha  = load_session(rep["school"], rep["department"],
+                                               rep["level"], att_type="LECTURE")
+            _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
+                                               rep["level"], att_type="PRACTICAL")
 
-                if _lec_running and _prac_running:
-                    st.info("Both a Lecture and Practical attendance are already running. End one before starting another of the same type.")
-                else:
-                    with st.form("start_att"):
-                        course_code = st.text_input("Course Code", placeholder="e.g. CSC301")
-                        # Only show types not already running
-                        _avail_types = []
-                        if not _lec_running:  _avail_types.append("LECTURE")
-                        if not _prac_running: _avail_types.append("PRACTICAL")
-                        att_type_sel = st.radio(
-                            "Attendance Type", _avail_types,
-                            horizontal=True,
-                            help="LECTURE and PRACTICAL can run concurrently but not two of the same type."
-                        )
-                        start_btn = st.form_submit_button("▶ Start Attendance", type="primary")
-
-                    if start_btn:
-                        _sem_rep = load_active_semester()
-                        if not _sem_rep:
-                            st.error("🔒 No active semester. ICT must start a semester before attendance can be taken.")
-                        elif not course_code.strip():
-                            st.error("Please enter a course code.")
-                        else:
-                            with st.spinner("Starting..."):
-                                session, sha = start_session(
-                                    rep["school"], rep["department"], rep["level"],
-                                    course_code, rep["username"],
-                                    att_type=att_type_sel,
-                                )
-                            st.session_state.rep_session     = session
-                            st.session_state.rep_session_sha = sha
-                            st.session_state.rep_att_type    = att_type_sel
-                            # Reset kill triggers for both types
-                            st.session_state["rep_kill_triggered_L"] = False
-                            st.session_state["rep_kill_triggered_P"] = False
-                            st.rerun()
-
-            # ── Session History ───────────────────────────────────────────────
-            st.divider()
-            st.markdown("### 📋 Your Session History")
-            with st.spinner("Loading history..."):
-                history = load_session_history(rep["username"])
-            if not history:
-                st.info("No past sessions yet. Your pushed attendances will appear here.")
-            else:
-                hist_df = pd.DataFrame(history)
-                hist_df.columns = [c.replace("_", " ").title() for c in hist_df.columns]
-                st.dataframe(hist_df, use_container_width=True, hide_index=True)
-                st.caption(f"Showing last {len(history)} session(s). Only successfully pushed sessions are recorded.")
-            st.stop()
-
-        # ── Active session display — one or both types ───────────────────────────
-        _lec_s,  _lec_sha  = load_session(rep["school"], rep["department"],
-                                           rep["level"], att_type="LECTURE")
-        _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
-                                           rep["level"], att_type="PRACTICAL")
-
-        if _lec_s and _prac_s:
-            # Both running — side by side
-            _col_l, _col_p = st.columns(2)
-            with _col_l:
-                st.markdown("#### 📖 Lecture")
+            if _lec_s and _prac_s:
+                # Both running — side by side
+                _col_l, _col_p = st.columns(2)
+                with _col_l:
+                    st.markdown("#### 📖 Lecture")
+                    _render_att_session(_lec_s,  _lec_sha,  rep, sfx="_L")
+                with _col_p:
+                    st.markdown("#### 🔬 Practical")
+                    _render_att_session(_prac_s, _prac_sha, rep, sfx="_P")
+            elif _lec_s:
                 _render_att_session(_lec_s,  _lec_sha,  rep, sfx="_L")
-            with _col_p:
-                st.markdown("#### 🔬 Practical")
+            elif _prac_s:
                 _render_att_session(_prac_s, _prac_sha, rep, sfx="_P")
-        elif _lec_s:
-            _render_att_session(_lec_s,  _lec_sha,  rep, sfx="_L")
-        elif _prac_s:
-            _render_att_session(_prac_s, _prac_sha, rep, sfx="_P")
 
-        # ── Countdown tick ────────────────────────────────────────────────────────
-        time.sleep(1)
-        st.rerun()
+            # ── Countdown tick ────────────────────────────────────────────────────────
+            time.sleep(1)
+            st.rerun()
+
+        with rep_tab2:
+            # ── Start new attendance / history ─────────────────────────────────
+            # ── No active session — start one + show history ─────────────────────────
+            if not session:
+                # School day/time gate for rep too
+                _rep_time_ok, _rep_time_msg = is_school_time()
+                if not _rep_time_ok:
+                    st.markdown(f"""<div class="info-card" style="text-align:center;padding:1.5rem">
+                        <div style="font-size:2rem">🕐</div>
+                        <b>Outside School Hours</b><br>
+                        <span style="opacity:0.75">{_rep_time_msg}</span>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown("### ▶ Start New Attendance")
+
+                    # Check which types are already running
+                    _lec_running  = bool(load_session(rep["school"], rep["department"], rep["level"], att_type="LECTURE")[0])
+                    _prac_running = bool(load_session(rep["school"], rep["department"], rep["level"], att_type="PRACTICAL")[0])
+
+                    if _lec_running and _prac_running:
+                        st.info("Both a Lecture and Practical attendance are already running. End one before starting another of the same type.")
+                    else:
+                        with st.form("start_att"):
+                            course_code = st.text_input("Course Code", placeholder="e.g. CSC301")
+                            # Only show types not already running
+                            _avail_types = []
+                            if not _lec_running:  _avail_types.append("LECTURE")
+                            if not _prac_running: _avail_types.append("PRACTICAL")
+                            att_type_sel = st.radio(
+                                "Attendance Type", _avail_types,
+                                horizontal=True,
+                                help="LECTURE and PRACTICAL can run concurrently but not two of the same type."
+                            )
+                            start_btn = st.form_submit_button("▶ Start Attendance", type="primary")
+
+                        if start_btn:
+                            _sem_rep = load_active_semester()
+                            if not _sem_rep:
+                                st.error("🔒 No active semester. ICT must start a semester before attendance can be taken.")
+                            elif not course_code.strip():
+                                st.error("Please enter a course code.")
+                            else:
+                                with st.spinner("Starting..."):
+                                    session, sha = start_session(
+                                        rep["school"], rep["department"], rep["level"],
+                                        course_code, rep["username"],
+                                        att_type=att_type_sel,
+                                    )
+                                st.session_state.rep_session     = session
+                                st.session_state.rep_session_sha = sha
+                                st.session_state.rep_att_type    = att_type_sel
+                                # Reset kill triggers for both types
+                                st.session_state["rep_kill_triggered_L"] = False
+                                st.session_state["rep_kill_triggered_P"] = False
+                                st.rerun()
+
+                # ── Session History ───────────────────────────────────────────────
+                st.divider()
+                st.markdown("### 📋 Your Session History")
+                with st.spinner("Loading history..."):
+                    history = load_session_history(rep["username"])
+                if not history:
+                    st.info("No past sessions yet. Your pushed attendances will appear here.")
+                else:
+                    hist_df = pd.DataFrame(history)
+                    hist_df.columns = [c.replace("_", " ").title() for c in hist_df.columns]
+                    st.dataframe(hist_df, use_container_width=True, hide_index=True)
+                    st.caption(f"Showing last {len(history)} session(s). Only successfully pushed sessions are recorded.")
+                st.stop()
+
 
 except Exception as _err:
     if type(_err).__name__ in ("StopException", "RerunException"):

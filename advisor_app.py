@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from futo_data import get_schools, get_departments, get_levels, get_full_structure, save_structure, invalidate_structure_cache, get_school_abbr
 from core import (
     load_active_semester, start_semester, end_semester, load_semester_history,
-    load_student_gpa, assign_semester_gpa, compute_cgpa, get_dept_matric_numbers,
+    load_student_gpa, assign_semester_gpa, assign_gpa_for_semester,
+    compute_cgpa, get_dept_matric_numbers, get_dept_students,
     lava_sem_path, get_available_sessions, get_semesters_for_session,
     authenticate_user, authenticate_ict, load_users, create_user,
     update_password, delete_user, get_reps_for_dept, get_advisors_for_dept,
@@ -676,7 +677,7 @@ try:
                 do_logout()
                 st.rerun()
 
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "📈 Dept Stats", "🔧 My Account", "💬 Chat"])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["👥 Course Reps", "🔑 Passwords", "🏷️ Abbreviation", "📊 GPA Calculator", "🎓 GPA Management", "📈 Dept Stats", "🔧 My Account", "💬 Chat"])
 
         # ── TAB 1 — Course Reps ───────────────────────────────────────────────────
         with tab1:
@@ -1139,8 +1140,471 @@ try:
                             else:
                                 st.error(_msg_g)
 
-        # ── TAB 5 — Department Statistics ────────────────────────────────────────
+        # ── TAB 5 — GPA Management ───────────────────────────────────────────────
         with tab5:
+            import pandas as _gpd
+            from io import BytesIO as _BytesIO
+
+            st.markdown(f"### 🎓 GPA Management — {department}")
+
+            # ── Load student roster from LAVA (cached per session) ───────────────
+            if "gpa_mgmt_students" not in st.session_state:
+                with st.spinner("Loading student records from LAVA…"):
+                    try:
+                        st.session_state.gpa_mgmt_students = get_dept_students(school, department)
+                    except Exception:
+                        st.session_state.gpa_mgmt_students = []
+
+            _all_students = st.session_state.gpa_mgmt_students
+
+            # ── Filters row ───────────────────────────────────────────────────────
+            _gf1, _gf2, _gf3 = st.columns([3, 2, 1])
+            with _gf1:
+                _search = st.text_input("🔍 Search name or matric", key="gpa_search",
+                                        placeholder="e.g. Adaeze or 2021/12345")
+            with _gf2:
+                _levels = sorted({s["level"] for s in _all_students}) if _all_students else []
+                _lvl_opts = ["All Levels"] + [f"{l}L" for l in _levels]
+                _sel_lvl = st.selectbox("Filter by Level", _lvl_opts, key="gpa_lvl_filter")
+            with _gf3:
+                st.markdown("<div style='padding-top:1.75rem'>", unsafe_allow_html=True)
+                if st.button("🔄 Refresh", key="gpa_refresh_roster", use_container_width=True):
+                    st.session_state.pop("gpa_mgmt_students", None)
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # ── Apply filters ─────────────────────────────────────────────────────
+            _filtered = _all_students
+            if _sel_lvl != "All Levels":
+                _lvl_code = _sel_lvl.replace("L", "")
+                _filtered = [s for s in _filtered if s["level"] == _lvl_code]
+            if _search.strip():
+                _q = _search.strip().lower()
+                _filtered = [s for s in _filtered
+                             if _q in s["full_name"].lower() or _q in s["matric"].lower()]
+
+            if not _all_students:
+                st.info("No student records found in LAVA for your department yet. "
+                        "Push some attendance first.")
+                st.stop()
+
+            if not _filtered:
+                st.warning("No students match your search.")
+                st.stop()
+
+            # ── Student selector ──────────────────────────────────────────────────
+            _stu_labels = [f"{s['full_name']} — {s['matric']} ({s['level']}L)"
+                           for s in _filtered]
+            _sel_idx = st.selectbox("Select Student", range(len(_stu_labels)),
+                                    format_func=lambda i: _stu_labels[i],
+                                    key="gpa_sel_student")
+            _sel_stu = _filtered[_sel_idx]
+            _sel_matric = _sel_stu["matric"]
+
+            st.markdown("---")
+
+            # ── GPA history for selected student ──────────────────────────────────
+            _gpa_records = load_student_gpa(_sel_matric)
+
+            _cgpa_col, _hist_col = st.columns([1, 2])
+            with _cgpa_col:
+                if _gpa_records:
+                    _cgpa = compute_cgpa(_gpa_records)
+                    _standing = (
+                        "First Class"        if _cgpa >= 4.5 else
+                        "Second Class Upper" if _cgpa >= 3.5 else
+                        "Second Class Lower" if _cgpa >= 2.4 else
+                        "Third Class"        if _cgpa >= 1.5 else "Pass / Fail"
+                    )
+                    _col = (
+                        "#27ae60" if _cgpa >= 4.5 else
+                        "#2980b9" if _cgpa >= 3.5 else
+                        "#f39c12" if _cgpa >= 2.4 else
+                        "#e67e22" if _cgpa >= 1.5 else "#c0392b"
+                    )
+                    st.markdown(f"""
+                    <div style="background:rgba(0,0,0,0.05);border:2px solid {_col};
+                        border-radius:14px;padding:1.2rem;text-align:center">
+                        <div style="font-size:2.8rem;font-weight:900;color:{_col};line-height:1">
+                            {_cgpa:.2f}
+                        </div>
+                        <div style="font-size:0.7rem;opacity:0.6;text-transform:uppercase;
+                            letter-spacing:1px;margin-top:0.3rem">CGPA</div>
+                        <div style="font-size:0.85rem;color:{_col};font-weight:600;
+                            margin-top:0.25rem">{_standing}</div>
+                        <div style="font-size:0.75rem;opacity:0.55;margin-top:0.2rem">
+                            {len(_gpa_records)} semester(s)
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div style="background:rgba(0,0,0,0.05);border:2px dashed rgba(128,128,128,0.3);
+                        border-radius:14px;padding:1.2rem;text-align:center;opacity:0.6">
+                        <div style="font-size:2rem">—</div>
+                        <div style="font-size:0.8rem">No GPA recorded yet</div>
+                    </div>""", unsafe_allow_html=True)
+
+            with _hist_col:
+                if _gpa_records:
+                    _hist_df = _gpd.DataFrame([{
+                        "Semester":    r.get("semester", ""),
+                        "GPA":         f"{r.get('gpa', 0):.2f}",
+                        "Assigned By": r.get("assigned_by", ""),
+                        "Date":        r.get("assigned_at", "")[:10],
+                    } for r in _gpa_records])
+                    st.dataframe(_hist_df, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("GPA history will appear here once recorded.")
+
+            # ── Assign GPA form ───────────────────────────────────────────────────
+            st.markdown("#### Assign / Update GPA")
+
+            _sessions = get_available_sessions()
+            if not _sessions:
+                st.warning("No sessions found. ICT must start at least one semester first.")
+            else:
+                _ga1, _ga2 = st.columns(2)
+                with _ga1:
+                    _sel_session = st.selectbox("Academic Session", _sessions,
+                                                key="gpa_assign_session")
+                with _ga2:
+                    _session_sems = get_semesters_for_session(_sel_session)
+                    if not _session_sems:
+                        st.warning(f"No semesters found for {_sel_session}.")
+                        _sel_sem_record = None
+                    else:
+                        _sem_labels = [s["label"] for s in _session_sems]
+                        _sel_sem_label = st.selectbox("Semester", _sem_labels,
+                                                      key="gpa_assign_semester")
+                        _sel_sem_record = next(
+                            (s for s in _session_sems if s["label"] == _sel_sem_label), None
+                        )
+
+                if _sel_sem_record:
+                    # Check if GPA already assigned for this semester
+                    _existing = next(
+                        (r for r in _gpa_records
+                         if r.get("semester") == _sel_sem_record["label"]),
+                        None
+                    )
+                    if _existing:
+                        st.info(f"GPA of **{_existing['gpa']:.2f}** already assigned for "
+                                f"**{_sel_sem_record['label']}**. Submit to update.")
+
+                    with st.form("gpa_mgmt_assign_form"):
+                        _new_gpa = st.number_input(
+                            f"GPA for {_sel_sem_record['label']}",
+                            min_value=0.0, max_value=5.0, step=0.01, format="%.2f",
+                            value=float(_existing["gpa"]) if _existing else 0.0,
+                        )
+                        _save_btn = st.form_submit_button(
+                            "💾 Save GPA", type="primary", use_container_width=True
+                        )
+
+                    if _save_btn:
+                        _ok, _msg = assign_gpa_for_semester(
+                            _sel_matric, _new_gpa,
+                            adv["username"], department,
+                            _sel_sem_record["label"],
+                        )
+                        if _ok:
+                            st.success(_msg)
+                            st.rerun()
+                        else:
+                            st.error(_msg)
+
+            # ══════════════════════════════════════════════════════════════════════
+            # ── Level Export ─────────────────────────────────────────────────────
+            # ══════════════════════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("### 📤 Export Level GPA List")
+
+            _exp_levels = sorted({s["level"] for s in _all_students})
+            if not _exp_levels:
+                st.info("No student records available for export.")
+            else:
+                _exp_lvl = st.selectbox(
+                    "Select Level to Export",
+                    [f"{l}L" for l in _exp_levels],
+                    key="gpa_export_level"
+                )
+                _exp_lvl_code = _exp_lvl.replace("L", "")
+                _exp_students = [s for s in _all_students if s["level"] == _exp_lvl_code]
+
+                # Build export rows — one row per student with all semester GPAs + CGPA
+                def _build_export_rows():
+                    # Gather all unique semester labels across all students
+                    all_sem_labels: list[str] = []
+                    all_gpa_data: dict[str, list] = {}
+                    for _s in _exp_students:
+                        _recs = load_student_gpa(_s["matric"])
+                        all_gpa_data[_s["matric"]] = _recs
+                        for _r in _recs:
+                            _lbl = _r.get("semester", "")
+                            if _lbl and _lbl not in all_sem_labels:
+                                all_sem_labels.append(_lbl)
+
+                    # Sort semester labels chronologically by their started_at if possible
+                    # Fall back to alphabetical otherwise
+                    all_sem_labels = sorted(set(all_sem_labels))
+
+                    rows = []
+                    for _s in _exp_students:
+                        _recs = all_gpa_data[_s["matric"]]
+                        _rec_map = {r["semester"]: r["gpa"] for r in _recs}
+                        _cgpa_val = compute_cgpa(_recs) if _recs else None
+                        row = {
+                            "S/N":        len(rows) + 1,
+                            "Surname":    _s["surname"],
+                            "Other Names": _s["other_names"],
+                            "Matric No.": _s["matric"],
+                        }
+                        for _lbl in all_sem_labels:
+                            row[_lbl] = f"{_rec_map[_lbl]:.2f}" if _lbl in _rec_map else "—"
+                        row["CGPA"] = f"{_cgpa_val:.2f}" if _cgpa_val is not None else "—"
+                        rows.append(row)
+                    return rows, all_sem_labels
+
+                _ecol1, _ecol2, _ecol3 = st.columns(3)
+
+                # ── Excel export ──────────────────────────────────────────────────
+                def _export_excel():
+                    import openpyxl as _xl
+                    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+                    rows, sem_labels = _build_export_rows()
+                    wb = _xl.Workbook()
+                    ws = wb.active
+                    ws.title = f"GPA {_exp_lvl}"
+
+                    RED_FILL  = PatternFill("solid", fgColor="7B0000")
+                    GREY_FILL = PatternFill("solid", fgColor="F2F2F2")
+                    thin      = Side(style="thin", color="CCCCCC")
+                    border    = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+                    # Title
+                    ws.merge_cells(f"A1:{chr(68 + len(sem_labels))}1")
+                    title_cell = ws["A1"]
+                    title_cell.value = (f"Federal University of Technology, Owerri\n"
+                                        f"{department} — {_exp_lvl} GPA Record")
+                    title_cell.font      = Font(bold=True, size=13, color="7B0000")
+                    title_cell.alignment = Alignment(wrap_text=True, horizontal="center",
+                                                     vertical="center")
+                    ws.row_dimensions[1].height = 42
+
+                    # Headers
+                    headers = ["S/N", "Surname", "Other Names", "Matric No."] + sem_labels + ["CGPA"]
+                    for ci, h in enumerate(headers, 1):
+                        cell = ws.cell(row=2, column=ci, value=h)
+                        cell.font      = Font(bold=True, color="FFFFFF", size=10)
+                        cell.fill      = RED_FILL
+                        cell.alignment = Alignment(horizontal="center", vertical="center",
+                                                   wrap_text=True)
+                        cell.border    = border
+                    ws.row_dimensions[2].height = 32
+
+                    # Data rows
+                    for ri, row in enumerate(rows, 3):
+                        fill = GREY_FILL if ri % 2 == 0 else PatternFill()
+                        for ci, h in enumerate(headers, 1):
+                            cell = ws.cell(row=ri, column=ci, value=row.get(h, ""))
+                            cell.fill      = fill
+                            cell.border    = border
+                            cell.alignment = Alignment(horizontal="center" if ci != 3 else "left",
+                                                       vertical="center")
+                            cell.font      = Font(size=10,
+                                                  bold=(h == "CGPA"),
+                                                  color=("7B0000" if h == "CGPA" else "000000"))
+
+                    # Column widths
+                    col_widths = [5, 18, 18, 16] + [22] * len(sem_labels) + [10]
+                    for ci, w in enumerate(col_widths, 1):
+                        ws.column_dimensions[_xl.utils.get_column_letter(ci)].width = w
+
+                    buf = _BytesIO()
+                    wb.save(buf)
+                    return buf.getvalue()
+
+                # ── Word export ───────────────────────────────────────────────────
+                def _export_word():
+                    from docx import Document as _Doc
+                    from docx.shared import Pt, RGBColor, Cm
+                    from docx.enum.text import WD_ALIGN_PARAGRAPH
+                    from docx.oxml.ns import qn
+                    from docx.oxml import OxmlElement
+
+                    rows, sem_labels = _build_export_rows()
+                    doc = _Doc()
+                    for sec in doc.sections:
+                        sec.page_width  = Cm(29.7)
+                        sec.page_height = Cm(21.0)
+                        sec.left_margin = sec.right_margin = Cm(1.8)
+
+                    def _add_run(para, text, bold=False, size=11, color=None):
+                        run = para.add_run(text)
+                        run.bold      = bold
+                        run.font.size = Pt(size)
+                        if color:
+                            run.font.color.rgb = RGBColor(*color)
+                        return run
+
+                    # Title block
+                    t = doc.add_paragraph()
+                    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    _add_run(t, "Federal University of Technology, Owerri\n",
+                             bold=True, size=14, color=(123, 0, 0))
+                    _add_run(t, f"{department} — {_exp_lvl} GPA Record",
+                             bold=True, size=12, color=(123, 0, 0))
+
+                    doc.add_paragraph()
+
+                    # Table
+                    headers = ["S/N", "Surname", "Other Names", "Matric No."] + sem_labels + ["CGPA"]
+                    tbl = doc.add_table(rows=1, cols=len(headers))
+                    tbl.style = "Table Grid"
+
+                    def _set_cell_bg(cell, hex_color):
+                        tc   = cell._tc
+                        tcPr = tc.get_or_add_tcPr()
+                        shd  = OxmlElement("w:shd")
+                        shd.set(qn("w:val"), "clear")
+                        shd.set(qn("w:color"), "auto")
+                        shd.set(qn("w:fill"), hex_color)
+                        tcPr.append(shd)
+
+                    # Header row
+                    hdr_row = tbl.rows[0]
+                    for i, h in enumerate(headers):
+                        cell = hdr_row.cells[i]
+                        cell.text = ""
+                        p = cell.paragraphs[0]
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        _add_run(p, h, bold=True, size=9, color=(255, 255, 255))
+                        _set_cell_bg(cell, "7B0000")
+
+                    # Data rows
+                    for ri, row in enumerate(rows):
+                        tr = tbl.add_row()
+                        bg = "F2F2F2" if ri % 2 == 0 else "FFFFFF"
+                        for ci, h in enumerate(headers):
+                            cell = tr.cells[ci]
+                            cell.text = ""
+                            p = cell.paragraphs[0]
+                            p.alignment = (WD_ALIGN_PARAGRAPH.LEFT
+                                           if h in ("Surname", "Other Names")
+                                           else WD_ALIGN_PARAGRAPH.CENTER)
+                            _add_run(p, str(row.get(h, "")),
+                                     bold=(h == "CGPA"), size=9,
+                                     color=((123, 0, 0) if h == "CGPA" else (0, 0, 0)))
+                            _set_cell_bg(cell, bg)
+
+                    buf = _BytesIO()
+                    doc.save(buf)
+                    return buf.getvalue()
+
+                # ── PDF export ────────────────────────────────────────────────────
+                def _export_pdf():
+                    from reportlab.lib.pagesizes import A4, landscape
+                    from reportlab.platypus import (SimpleDocTemplate, Table,
+                                                    TableStyle, Paragraph, Spacer)
+                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                    from reportlab.lib import colors
+                    from reportlab.lib.units import cm
+
+                    rows, sem_labels = _build_export_rows()
+                    buf   = _BytesIO()
+                    doc   = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                                              leftMargin=1.5*cm, rightMargin=1.5*cm,
+                                              topMargin=1.5*cm, bottomMargin=1.5*cm)
+                    styles = getSampleStyleSheet()
+                    RED    = colors.HexColor("#7B0000")
+                    LGREY  = colors.HexColor("#F2F2F2")
+
+                    title_style = ParagraphStyle("title", parent=styles["Normal"],
+                                                 fontSize=13, textColor=RED,
+                                                 fontName="Helvetica-Bold",
+                                                 alignment=1, spaceAfter=6)
+                    sub_style   = ParagraphStyle("sub", parent=styles["Normal"],
+                                                 fontSize=10, textColor=RED,
+                                                 fontName="Helvetica-Bold",
+                                                 alignment=1, spaceAfter=12)
+
+                    headers = ["S/N", "Surname", "Other Names", "Matric No."] + sem_labels + ["CGPA"]
+                    tbl_data = [headers]
+                    for row in rows:
+                        tbl_data.append([str(row.get(h, "")) for h in headers])
+
+                    col_w = ([1.0*cm, 3.5*cm, 3.5*cm, 3.0*cm]
+                             + [3.2*cm] * len(sem_labels)
+                             + [2.0*cm])
+
+                    tbl_obj = Table(tbl_data, colWidths=col_w, repeatRows=1)
+                    tbl_style = [
+                        ("BACKGROUND",  (0,0), (-1,0), RED),
+                        ("TEXTCOLOR",   (0,0), (-1,0), colors.white),
+                        ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
+                        ("FONTSIZE",    (0,0), (-1,-1), 8),
+                        ("ALIGN",       (0,0), (-1,-1), "CENTER"),
+                        ("ALIGN",       (1,1), (2,-1), "LEFT"),
+                        ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+                        ("FONTNAME",    (-1,1), (-1,-1), "Helvetica-Bold"),
+                        ("TEXTCOLOR",   (-1,1), (-1,-1), RED),
+                        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, LGREY]),
+                        ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+                        ("TOPPADDING",  (0,0), (-1,-1), 4),
+                        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+                    ]
+                    tbl_obj.setStyle(TableStyle(tbl_style))
+
+                    story = [
+                        Paragraph("Federal University of Technology, Owerri", title_style),
+                        Paragraph(f"{department} — {_exp_lvl} GPA Record", sub_style),
+                        tbl_obj,
+                    ]
+                    doc.build(story)
+                    return buf.getvalue()
+
+                # ── Download buttons ──────────────────────────────────────────────
+                with _ecol1:
+                    try:
+                        _excel_bytes = _export_excel()
+                        st.download_button(
+                            "📥 Download Excel",
+                            data=_excel_bytes,
+                            file_name=f"GPA_{department}_{_exp_lvl}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+                    except Exception as _e:
+                        st.error(f"Excel error: {_e}")
+
+                with _ecol2:
+                    try:
+                        _word_bytes = _export_word()
+                        st.download_button(
+                            "📥 Download Word",
+                            data=_word_bytes,
+                            file_name=f"GPA_{department}_{_exp_lvl}.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True,
+                        )
+                    except Exception as _e:
+                        st.error(f"Word error: {_e}")
+
+                with _ecol3:
+                    try:
+                        _pdf_bytes = _export_pdf()
+                        st.download_button(
+                            "📥 Download PDF",
+                            data=_pdf_bytes,
+                            file_name=f"GPA_{department}_{_exp_lvl}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                        )
+                    except Exception as _e:
+                        st.error(f"PDF error: {_e}")
+
+        # ── TAB 6 — Department Statistics ────────────────────────────────────────
+        with tab6:
             import requests as _req
             import pandas as _pd
             from io import BytesIO as _BytesIO
@@ -1976,8 +2440,8 @@ try:
                     st.error(f"Export failed: {e}")
 
 
-        # ── TAB 6 — My Account ────────────────────────────────────────────────────
-        with tab6:
+        # ── TAB 7 — My Account ────────────────────────────────────────────────────
+        with tab7:
             try:
                 st.markdown("### My Account")
                 st.markdown(f"""<div class="info-card">
@@ -2011,8 +2475,8 @@ try:
             except Exception as _tab6_err:
                 st.error(f"My Account error: {_tab6_err}")
 
-        # ── TAB 7 — Chat ──────────────────────────────────────────────────────────
-        with tab7:
+        # ── TAB 8 — Chat ──────────────────────────────────────────────────────────
+        with tab8:
             try:
                 import math as _math
 

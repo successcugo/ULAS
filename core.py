@@ -624,3 +624,108 @@ def get_dept_matric_numbers(school: str, department: str) -> list[str]:
     except Exception:
         pass
     return sorted(matric_set)
+
+def assign_gpa_for_semester(
+    matric: str,
+    gpa_value: float,
+    advisor_username: str,
+    advisor_dept: str,
+    semester_label: str,        # e.g. "First Semester 2025/2026"
+) -> tuple[bool, str]:
+    """
+    Assign a GPA for any named semester (active OR historical).
+    Overwrites if the same semester label already exists.
+    """
+    records      = load_student_gpa(matric)
+    existing_sha = read_json(_gpa_path(matric))[1]
+    gpa_val      = round(float(gpa_value), 2)
+
+    for r in records:
+        if r.get("semester") == semester_label:
+            r["gpa"]          = gpa_val
+            r["assigned_by"]  = advisor_username
+            r["dept"]         = advisor_dept
+            r["assigned_at"]  = futo_now_str()
+            new_sha = write_json(
+                _gpa_path(matric), records,
+                f"GPA update: {matric} {semester_label}", existing_sha
+            )
+            return (True,  f"GPA updated for {matric} — {semester_label}") if new_sha \
+              else (False, "GitHub write failed — please try again.")
+
+    records.append({
+        "semester":    semester_label,
+        "gpa":         gpa_val,
+        "assigned_by": advisor_username,
+        "dept":        advisor_dept,
+        "assigned_at": futo_now_str(),
+    })
+    new_sha = write_json(
+        _gpa_path(matric), records,
+        f"GPA assign: {matric} {semester_label}", existing_sha
+    )
+    return (True,  f"GPA recorded for {matric} — {semester_label}") if new_sha \
+      else (False, "GitHub write failed — please try again.")
+
+
+def get_dept_students(school: str, department: str) -> list[dict]:
+    """
+    Scan ALL LAVA CSVs for this department and return a deduplicated
+    list of student dicts:
+        { matric, surname, other_names, full_name, level }
+    level is extracted from the filename prefix e.g. ESETCPE300 → "300"
+    The most recently seen name for each matric wins.
+    """
+    import base64, re as _re
+    from github_store import _gh_get, _lava_repo
+
+    school_abbr = get_school_abbr(school)
+    dept_abbr   = get_dept_abbreviation(department)
+    prefix      = f"{school_abbr}{dept_abbr}"          # e.g. "ESETCPE"
+    students: dict[str, dict] = {}                     # matric → record
+
+    try:
+        repo = _lava_repo()
+
+        def _scan_dir(path: str):
+            items = _gh_get(repo, path)
+            if not items or not isinstance(items, list):
+                return
+            for item in items:
+                if item.get("type") == "dir":
+                    _scan_dir(f"{path}/{item['name']}")
+                elif item.get("type") == "file":
+                    fname = item.get("name", "")
+                    if not fname.endswith(".csv") or not fname.startswith(prefix):
+                        continue
+                    # Extract level from filename: prefix + level + "_"
+                    # e.g. ESETCPE300_... → level "300"
+                    tail  = fname[len(prefix):]
+                    m     = _re.match(r"^(\d{3})", tail)
+                    level = m.group(1) if m else "?"
+                    raw   = _gh_get(repo, f"{path}/{fname}")
+                    if not raw:
+                        continue
+                    content = base64.b64decode(raw["content"]).decode()
+                    for line in content.splitlines()[1:]:
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) < 4:
+                            continue
+                        matric     = parts[3]
+                        surname    = parts[1]
+                        other_names = parts[2]
+                        if not matric:
+                            continue
+                        students[matric] = {
+                            "matric":      matric,
+                            "surname":     surname,
+                            "other_names": other_names,
+                            "full_name":   f"{surname} {other_names}".strip(),
+                            "level":       level,
+                        }
+
+        _scan_dir("attendances")
+    except Exception:
+        pass
+
+    return sorted(students.values(), key=lambda s: (s["level"], s["surname"]))

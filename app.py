@@ -226,39 +226,65 @@ def _render_att_session(session, sha, rep, sfx=""):
     _type_icon = "📖" if _att_type_disp == "LECTURE" else "🔬"
     st.markdown(f"### 🟢 Active — {session['course_code']} &nbsp; {_type_icon} {_att_type_disp.title()}")
 
-    # ── Token display ─────────────────────────────────────────────────────────
+    # ── Token + Countdown (pure JS — no server rerun needed) ───────────────────
+    import json as _json
+    _started_iso  = session["started_at"]
+    _tok_gen_iso  = session.get("token_generated_at", _started_iso)
+    _att_mins     = int(session.get("lifetime_minutes", 60))
+    _tok_secs_js  = int(_tok_lifetime)
+    _action_js    = _att_action
+    _act_label    = "Flag late entries" if _att_action == "flag" else "Auto-submit when done"
+    _token_val    = session["token"]
+    _entry_count  = len(session["entries"])
+    _started_disp = session["started_at"][11:16]
+
     st.markdown(f"""
-    <div class="token-display">
-        <div class="code">{session['token']}</div>
-        <div class="label">Attendance Code — share this with students verbally</div>
-    </div>""", unsafe_allow_html=True)
-    st.progress(max(0.0, _tok_remaining / _tok_lifetime))
-    st.caption(f"⏱ Code refreshes in **{_tok_remaining:.0f}s**")
-
-    # ── Attendance lifetime countdown ─────────────────────────────────────────
-    if _att_expired:
-        if _att_action == "flag":
-            st.warning(
-                f"⏰ Attendance window has closed ({_att_lifetime} min). "
-                f"The session is still open — all new entries are now marked **Late**."
-            )
-        # kill case handled above by auto-push
-    else:
-        _mins_left = int(_att_remaining)
-        _secs_left = int((_att_remaining - _mins_left) * 60)
-        _pct       = max(0.0, _att_remaining / _att_lifetime)
-        _bar_color = "#27ae60" if _pct > 0.5 else "#f39c12" if _pct > 0.2 else "#e74c3c"
-        st.markdown(
-            f"<div style='font-size:0.88rem;opacity:0.8;margin-bottom:0.3rem'>"
-            f"⏳ Attendance window: <b>{_mins_left}m {_secs_left:02d}s</b> remaining "
-            f"({'Flag late entries' if _att_action=='flag' else '⚡ Auto-submit when done'})"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-        st.progress(_pct)
-
-    st.caption(f"Started {session['started_at'][11:16]} · {len(session['entries'])} entries")
-
+<div class="token-display">
+    <div class="code">{_token_val}</div>
+    <div class="label">Attendance Code</div>
+</div>
+<div id="tok-cd{sfx}" style="font-size:0.78rem;opacity:0.6;text-align:center;margin-top:0.3rem">
+    ⏱ Code refreshes in <b id="tok-s{sfx}">…</b>s
+</div>
+<div style="margin:0.6rem 0 0.2rem">
+    <div id="att-cd{sfx}" style="font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem">⏳ Loading…</div>
+    <div style="background:#333;border-radius:4px;height:6px;overflow:hidden">
+        <div id="att-bar{sfx}" style="height:6px;border-radius:4px;background:#27ae60;width:100%"></div>
+    </div>
+</div>
+<div style="font-size:0.75rem;opacity:0.5;margin-top:0.35rem">
+    Started {_started_disp} · {_entry_count} entries
+</div>
+<script>
+(function(){{
+    var sfx     = "{sfx}";
+    var tokGen  = new Date("{_tok_gen_iso}".replace(" ","T"));
+    var attSt   = new Date("{_started_iso}".replace(" ","T"));
+    var tokSecs = {_tok_secs_js};
+    var attMins = {_att_mins};
+    var action  = "{_action_js}";
+    var actLbl  = "{_act_label}";
+    function tick(){{
+        var now=new Date(), tElap=(now-tokGen)/1000, tLeft=Math.max(0,tokSecs-(tElap%tokSecs));
+        var aElap=(now-attSt)/1000/60, aLeft=attMins-aElap, aPct=Math.max(0,Math.min(1,aLeft/attMins));
+        var ts=document.getElementById("tok-s"+sfx);
+        if(ts) ts.textContent=Math.ceil(tLeft);
+        var ac=document.getElementById("att-cd"+sfx), ab=document.getElementById("att-bar"+sfx);
+        if(ac){{
+            if(aLeft<=0){{
+                ac.innerHTML="⏰ Window closed — "+(action==="flag"?"late entries flagged.":"auto-submitting…");
+                if(ab){{ab.style.width="0%";ab.style.background="#e74c3c";}}
+            }}else{{
+                var m=Math.floor(aLeft),s=Math.floor((aLeft-m)*60);
+                var col=aPct>0.5?"#27ae60":aPct>0.2?"#f39c12":"#e74c3c";
+                ac.innerHTML="⏳ "+m+"m "+s.toString().padStart(2,"0")+"s — "+actLbl;
+                if(ab){{ab.style.width=(aPct*100)+"%";ab.style.background=col;}}
+            }}
+        }}
+    }}
+    tick(); setInterval(tick,1000);
+}})();
+</script>""", unsafe_allow_html=True)
     st.divider()
 
     # ── Manual add ────────────────────────────────────────────────────────────
@@ -950,10 +976,7 @@ try:
             else:
                 st.info("No active attendance sessions. Go to **▶ Start Attendance** to begin.")
 
-            # ── Countdown tick — only ticks when a session is active ─────────────────
-            if _lec_s or _prac_s:
-                time.sleep(1)
-                st.rerun()
+            # ── JS handles countdown — no server rerun needed ────────────────────────
 
         with rep_tab2:
             # ── Start New Attendance ──────────────────────────────────────────

@@ -126,6 +126,11 @@ DEFAULTS = {
     "rep_att_type": "LECTURE",  # currently managing type
     # Kill timer auto-push
     "rep_kill_triggered": False,
+    "rep_sessions_loaded": False,
+    "rep_lec_session": None,
+    "rep_lec_sha": None,
+    "rep_prac_session": None,
+    "rep_prac_sha": None,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -278,6 +283,7 @@ def _render_att_session(session, sha, rep, sfx=""):
                         st.session_state.rep_session     = fresh_s
                         st.session_state.rep_session_sha = new_sha
                         st.success(msg)
+                        st.session_state.rep_sessions_loaded = False
                         st.rerun()
                     else:
                         st.error(msg)
@@ -328,6 +334,7 @@ def _render_att_session(session, sha, rep, sfx=""):
                         st.session_state.rep_session     = fs
                         st.session_state.rep_session_sha = new_sha
                         st.success(msg)
+                        st.session_state.rep_sessions_loaded = False
                         st.rerun()
                     else:
                         st.error(msg)
@@ -346,14 +353,17 @@ def _render_att_session(session, sha, rep, sfx=""):
                             st.session_state.rep_session     = fs
                             st.session_state.rep_session_sha = new_sha
                         st.session_state[f"show_delete_confirm{sfx}"] = None
+                        st.session_state.rep_sessions_loaded = False
                         st.rerun()
                 with n:
                     if st.button("No", key=f"no_del{sfx}"):
                         st.session_state[f"show_delete_confirm{sfx}"] = None
+                        st.session_state.rep_sessions_loaded = False
                         st.rerun()
             else:
                 if st.button("🗑️ Delete", key=f"del_btn{sfx}"):
                     st.session_state[f"show_delete_confirm{sfx}"] = sel_sn
+                    st.session_state.rep_sessions_loaded = False
                     st.rerun()
 
     st.divider()
@@ -380,6 +390,7 @@ def _render_att_session(session, sha, rep, sfx=""):
                     st.success("✅ Attendance pushed to LAVA successfully!")
                     st.balloons()
                     time.sleep(2)
+                    st.session_state.rep_sessions_loaded = False
                     st.rerun()
                 else:
                     st.error("Push failed — session still open. Download backup below.")
@@ -425,10 +436,12 @@ def _render_att_session(session, sha, rep, sfx=""):
         with sc1:
             if st.button("✅ Confirm & Push to LAVA", type="primary", use_container_width=True):
                 st.session_state[f"pending_end{sfx}"] = True
+                st.session_state.rep_sessions_loaded = False
                 st.rerun()
         with sc2:
             if st.button("✏️ Back to Editing", use_container_width=True):
                 st.session_state[f"show_end_summary{sfx}"] = False
+                st.session_state.rep_sessions_loaded = False
                 st.rerun()
         with sc3:
             st.download_button(
@@ -445,6 +458,7 @@ def _render_att_session(session, sha, rep, sfx=""):
     with e1:
         if st.button("⏹ End Attendance", type="primary", use_container_width=True):
             st.session_state[f"show_end_summary{sfx}"] = True
+            st.session_state.rep_sessions_loaded = False
             st.rerun()
     with e2:
         st.download_button(
@@ -903,15 +917,25 @@ try:
         rep_tab1, rep_tab2 = st.tabs(["📋 Sessions", "▶ Start Attendance"])
 
         with rep_tab1:
-            # ── Active session display — one or both types ─────────────────────
-            # ── Active session display — one or both types ───────────────────────────
-            _lec_s,  _lec_sha  = load_session(rep["school"], rep["department"],
-                                               rep["level"], att_type="LECTURE")
-            _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
-                                               rep["level"], att_type="PRACTICAL")
+            # ── Active session display — use session_state (already loaded) ─────────
+            _lec_s   = st.session_state.get("rep_lec_session")
+            _lec_sha = st.session_state.get("rep_lec_sha")
+            _prac_s  = st.session_state.get("rep_prac_session")
+            _prac_sha = st.session_state.get("rep_prac_sha")
+
+            if not st.session_state.get("rep_sessions_loaded"):
+                with st.spinner("Loading sessions..."):
+                    _lec_s,  _lec_sha  = load_session(rep["school"], rep["department"],
+                                                       rep["level"], att_type="LECTURE")
+                    _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
+                                                       rep["level"], att_type="PRACTICAL")
+                st.session_state.rep_lec_session  = _lec_s
+                st.session_state.rep_lec_sha      = _lec_sha
+                st.session_state.rep_prac_session = _prac_s
+                st.session_state.rep_prac_sha     = _prac_sha
+                st.session_state.rep_sessions_loaded = True
 
             if _lec_s and _prac_s:
-                # Both running — side by side
                 _col_l, _col_p = st.columns(2)
                 with _col_l:
                     st.markdown("#### 📖 Lecture")
@@ -923,10 +947,13 @@ try:
                 _render_att_session(_lec_s,  _lec_sha,  rep, sfx="_L")
             elif _prac_s:
                 _render_att_session(_prac_s, _prac_sha, rep, sfx="_P")
+            else:
+                st.info("No active attendance sessions. Go to **▶ Start Attendance** to begin.")
 
-            # ── Countdown tick ────────────────────────────────────────────────────────
-            time.sleep(1)
-            st.rerun()
+            # ── Countdown tick — only ticks when a session is active ─────────────────
+            if _lec_s or _prac_s:
+                time.sleep(1)
+                st.rerun()
 
         with rep_tab2:
             # ── Start New Attendance ──────────────────────────────────────────
@@ -977,9 +1004,10 @@ try:
                             st.session_state.rep_session     = session
                             st.session_state.rep_session_sha = sha
                             st.session_state.rep_att_type    = att_type_sel
-                            # Reset kill triggers for both types
+                            # Reset kill triggers and session cache
                             st.session_state["rep_kill_triggered_L"] = False
                             st.session_state["rep_kill_triggered_P"] = False
+                            st.session_state.rep_sessions_loaded = False
                             st.rerun()
 
             # ── Session History ───────────────────────────────────────────────

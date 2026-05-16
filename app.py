@@ -883,7 +883,7 @@ try:
             except Exception as _tab_err:
                 if type(_tab_err).__name__ in ("StopException", "RerunException"):
                     raise
-                st.error(f"Something went wrong in Lecture tab. Please refresh.")
+                st.error(f"Lecture tab error: {type(_tab_err).__name__}: {_tab_err}")
 
         with rep_tab_prac:
             try:
@@ -891,7 +891,7 @@ try:
             except Exception as _tab_err:
                 if type(_tab_err).__name__ in ("StopException", "RerunException"):
                     raise
-                st.error(f"Something went wrong in Practical tab. Please refresh.")
+                st.error(f"Practical tab error: {type(_tab_err).__name__}: {_tab_err}")
 
         # ── Top-level token rotation rerun (safe — outside tabs) ─────────────────
         _tok_lifetime_top = load_settings().get("TOKEN_LIFETIME", 7)

@@ -17,7 +17,7 @@ from core import (
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
     futo_now, futo_now_str, futo_ts, load_active_semester,
-    is_school_time, att_remaining_minutes, is_att_expired,
+    is_school_time, att_remaining_minutes, att_elapsed_minutes, is_att_expired,
     add_entry_v2, flag_concurrent_in_other_session,
     session_to_csv_v2, build_csv_filename_v2,
 )
@@ -893,20 +893,11 @@ try:
                     raise
                 st.error(f"Practical tab error: {type(_tab_err).__name__}: {_tab_err}")
 
-        # ── Top-level token rotation rerun (safe — outside tabs) ─────────────────
-        _tok_lifetime_top = load_settings().get("TOKEN_LIFETIME", 7)
-        _now_top = futo_ts()
-        _rerun_due = False
-        for _sfx_check in ("L", "P"):
-            _sess_check = st.session_state.get(f"rep_sess_{_sfx_check}")
-            if _sess_check:
-                _tok_gen_check = _sess_check.get("token_generated_at", _now_top)
-                if isinstance(_tok_gen_check, (int, float)):
-                    _age = _now_top - float(_tok_gen_check)
-                    if _age >= int(_tok_lifetime_top):
-                        _rerun_due = True
-                        break
-        if _rerun_due:
+        # ── Continuous rerun when any session active — drives countdown + token rotation
+        _any_active = any(
+            st.session_state.get(f"rep_sess_{_s}") for _s in ("L", "P")
+        )
+        if _any_active:
             import time as _time_top
             _time_top.sleep(1)
             st.rerun()

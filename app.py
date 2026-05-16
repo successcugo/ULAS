@@ -16,7 +16,7 @@ from core import (
     add_entry, edit_entry, delete_entry, validate_matric,
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
-    futo_now, futo_now_str, load_active_semester,
+    futo_now, futo_now_str, futo_ts, load_active_semester,
     is_school_time, att_remaining_minutes, is_att_expired,
     add_entry_v2, flag_concurrent_in_other_session,
     session_to_csv_v2, build_csv_filename_v2,

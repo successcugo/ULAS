@@ -536,85 +536,32 @@ try:
         with hc2:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Logout"):
+                # Clear DEFAULTS
                 for k, v in DEFAULTS.items():
                     st.session_state[k] = v
+                # Clear all dynamic tab-scoped keys that aren't in DEFAULTS
+                for _sfx in ("L", "P"):
+                    for _dk in (f"rep_sess_{_sfx}", f"rep_sha_{_sfx}",
+                                f"rep_loaded_{_sfx}", f"rep_kill_triggered_{_sfx}",
+                                f"show_end_{_sfx}", f"push_success_{_sfx}",
+                                f"next_rerun_{_sfx}", f"autorefresh_{_sfx}"):
+                        st.session_state.pop(_dk, None)
                 st.rerun()
-
-        # ── Session loading strategy ───────────────────────────────────────────────
-        # Only fetch from GitHub once per login (when rep_session_loaded is False).
-        # After that, rep_session in st.session_state is the source of truth.
-        # This prevents the forced-logout race condition caused by re-fetching
-        # immediately after start_session writes to GitHub.
-        if not st.session_state.rep_session_loaded:
-            # Load whichever type was last active (try both, prefer LECTURE)
-            with st.spinner("Loading session..."):
-                _lec_s, _lec_sha  = load_session(rep["school"], rep["department"],
-                                                  rep["level"], att_type="LECTURE")
-                _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
-                                                   rep["level"], att_type="PRACTICAL")
-            # Use whichever is active; prefer most recently started
-            if _lec_s and _prac_s:
-                session = _lec_s; sha = _lec_sha
-                st.session_state.rep_att_type = "LECTURE"
-            elif _lec_s:
-                session = _lec_s; sha = _lec_sha
-                st.session_state.rep_att_type = "LECTURE"
-            elif _prac_s:
-                session = _prac_s; sha = _prac_sha
-                st.session_state.rep_att_type = "PRACTICAL"
-            else:
-                session = None; sha = None
-            st.session_state.rep_session        = session
-            st.session_state.rep_session_sha    = sha
-            st.session_state.rep_session_loaded = True
-
-        session = st.session_state.rep_session
-        sha     = st.session_state.rep_session_sha
-
-        # ── Rep-to-Rep Handoff check ──────────────────────────────────────────
-        # If session was started by a different rep, show an explicit take-over card
-        if (session and
-                session.get("rep_username") != rep["username"] and
-                not st.session_state.get("takeover_confirmed")):
-            other = session.get("rep_username", "another rep")
-            st.markdown("### 🔄 Active Session — Different Rep")
-            st.markdown(f"""<div class="info-card">
-                A session for <b>Level {session['level']}L — {session['course_code']}</b>
-                was started by <b>{other}</b> at {session['started_at'][11:16]}.<br>
-                <span style="opacity:0.7">
-                    You can take over management of this session,
-                    or wait for {other} to end it.
-                </span>
-            </div>""", unsafe_allow_html=True)
-            tc1, tc2 = st.columns(2)
-            with tc1:
-                if st.button("🔄 Take Over Session", type="primary", use_container_width=True):
-                    # Record the takeover in the session JSON
-                    fs, fs_sha = load_session(rep["school"], rep["department"], rep["level"])
-                    if fs:
-                        fs["rep_username"] = rep["username"]
-                        fs.setdefault("takeover_log", []).append({
-                            "taken_by": rep["username"],
-                            "from":     other,
-                            "at":       futo_now_str(),
-                        })
-                        new_sha = save_session(rep["school"], rep["department"], rep["level"], fs, fs_sha)
-                        st.session_state.rep_session        = fs
-                        st.session_state.rep_session_sha    = new_sha
-                        st.session_state.takeover_confirmed = True
-                        st.success(f"✅ You have taken over the session from {other}.")
-                        st.rerun()
-            with tc2:
-                if st.button("👁️ View Only (no changes)", use_container_width=True):
-                    st.session_state.takeover_confirmed = True
-                    st.rerun()
-            st.stop()
 
         # ── Rep tabs: Sessions | Start ────────────────────────────────────────────
         rep_tab_lec, rep_tab_prac = st.tabs(["📖 Lecture Attendance", "🔬 Practical Attendance"])
 
         def _render_tab(att_type, tab_sfx):
             """Render a fully self-contained attendance tab for one type."""
+            # ── Show push success banner and stop — prevents stale controls rendering
+            if st.session_state.get(f"push_success_{tab_sfx}"):
+                st.success(f"✅ {att_type.title()} attendance pushed to LAVA successfully!")
+                if st.button("Start New Session", key=f"new_after_push_{tab_sfx}",
+                             type="primary"):
+                    st.session_state[f"push_success_{tab_sfx}"] = False
+                    st.rerun()
+                return
+
             _sess_key = f"rep_sess_{tab_sfx}"
             _sha_key  = f"rep_sha_{tab_sfx}"
             _loaded_key = f"rep_loaded_{tab_sfx}"
@@ -857,8 +804,7 @@ try:
                             st.session_state[_sha_key]    = None
                             st.session_state[_loaded_key] = False
                             st.session_state[_end_key]    = False
-                            st.success("✅ Pushed to LAVA!")
-                            time.sleep(2)
+                            st.session_state[f"push_success_{tab_sfx}"] = True
                             st.rerun()
                         else:
                             st.error(f"Push failed: {_msg_p}")

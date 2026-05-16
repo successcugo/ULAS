@@ -724,11 +724,35 @@ try:
             # ── Token + JS countdown ──────────────────────────────────────────────
             _tok_val    = session["token"]
             _started_at = session["started_at"]
-            _tok_gen    = session.get("token_generated_at", _started_at)
             _act_label  = "Flag late entries" if _att_action == "flag" else "Auto-submit when done"
             _n_entries  = len(session["entries"])
             _started_disp = _started_at[11:16]
             _course     = session["course_code"]
+
+            # Convert timestamps to JS-safe milliseconds
+            # started_at is a datetime string; token_generated_at may be a Unix float
+            import datetime as _dt2
+            def _to_ms(val):
+                if val is None:
+                    return None
+                if isinstance(val, (int, float)):
+                    return int(float(val) * 1000)
+                # datetime string e.g. "2026-05-16 05:22:31"
+                try:
+                    import pytz as _pytz
+                    _tz = _pytz.timezone("Africa/Lagos")
+                except ImportError:
+                    _tz = _dt2.timezone(_dt2.timedelta(hours=1))
+                try:
+                    _d = _dt2.datetime.strptime(str(val)[:19], "%Y-%m-%d %H:%M:%S")
+                    _d = _d.replace(tzinfo=_tz)
+                    return int(_d.timestamp() * 1000)
+                except Exception:
+                    return None
+
+            _tok_gen_raw = session.get("token_generated_at", _started_at)
+            _tok_gen_ms  = _to_ms(_tok_gen_raw) or _to_ms(_started_at)
+            _att_start_ms = _to_ms(_started_at)
 
             st.markdown(f"### 🟢 Active — {_course}")
             st.markdown(f"""
@@ -750,8 +774,8 @@ try:
 </div>
 <script>
 (function(){{
-    var sfx="{tab_sfx}",tokGen=new Date("{_tok_gen}".replace(" ","T")),
-        attSt=new Date("{_started_at}".replace(" ","T")),
+    var sfx="{tab_sfx}",tokGen=new Date({_tok_gen_ms}),
+        attSt=new Date({_att_start_ms}),
         tokSecs={int(_tok_lifetime)},attMins={_att_lifetime},
         action="{_att_action}",actLbl="{_act_label}";
     function tick(){{

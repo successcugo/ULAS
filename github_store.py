@@ -66,8 +66,13 @@ def _get_default_branch(repo: str) -> str:
     return branch
 
 
-def _gh_put(repo: str, path: str, content_bytes: bytes, message: str, sha: str | None = None) -> bool:
-    """Write (create or update) a file on GitHub. Returns True on success."""
+def _gh_put(repo: str, path: str, content_bytes: bytes, message: str,
+             sha: str | None = None, _retry: bool = True) -> bool:
+    """
+    Write (create or update) a file on GitHub. Returns True on success.
+    On 409 (SHA conflict) automatically fetches the current SHA and retries once.
+    Never surfaces raw GitHub error messages to the user.
+    """
     url    = f"https://api.github.com/repos/{repo}/contents/{path}"
     branch = _get_default_branch(repo)
     payload: dict[str, Any] = {
@@ -77,17 +82,34 @@ def _gh_put(repo: str, path: str, content_bytes: bytes, message: str, sha: str |
     }
     if sha:
         payload["sha"] = sha
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers=_headers(), method="PUT")
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers=_headers(), method="PUT"
+    )
     try:
         with urllib.request.urlopen(req) as resp:
             return resp.status in (200, 201)
     except urllib.error.HTTPError as e:
         body = e.read().decode()
-        st.error(
-            f"GitHub write error ({e.code}) writing `{path}` to `{repo}` "
-            f"(branch: `{branch}`): {body[:400]}"
-        )
+        if e.code == 409 and _retry:
+            # SHA conflict — fetch current SHA and retry once
+            current = _gh_get(repo, path)
+            fresh_sha = current["sha"] if current else None
+            return _gh_put(repo, path, content_bytes, message,
+                           sha=fresh_sha, _retry=False)
+        if e.code == 422 and not sha:
+            # File already exists but we tried to create — fetch SHA and retry
+            current = _gh_get(repo, path)
+            fresh_sha = current["sha"] if current else None
+            if fresh_sha:
+                return _gh_put(repo, path, content_bytes, message,
+                               sha=fresh_sha, _retry=False)
+        # Log silently — never expose raw GitHub errors to users
+        import sys
+        print(f"[ULAS] GitHub write error {e.code} on {path}: {body[:200]}", file=sys.stderr)
+        return False
+    except Exception as e:
+        import sys
+        print(f"[ULAS] Unexpected error writing {path}: {e}", file=sys.stderr)
         return False
 
 
@@ -176,15 +198,28 @@ def push_csv_to_lava(lava_path: str, csv_content: str, message: str) -> tuple[bo
             return False, f"Unexpected status {resp.status}"
     except urllib.error.HTTPError as e:
         body = e.read().decode()
-        debug = (
-            f"**GitHub push failed**\n\n"
-            f"- Repo: `{repo}`\n"
-            f"- Branch: `{branch}`\n"
-            f"- Path: `{lava_path}`\n"
-            f"- HTTP status: `{e.code}`\n"
-            f"- Response: `{body[:500]}`"
-        )
-        return False, debug
+        if e.code == 409:
+            # SHA conflict — re-fetch and retry once
+            existing2 = _gh_get(repo, lava_path)
+            if existing2:
+                payload["sha"] = existing2["sha"]
+                req2 = urllib.request.Request(
+                    url, data=json.dumps(payload).encode(),
+                    headers=_headers(), method="PUT"
+                )
+                try:
+                    with urllib.request.urlopen(req2) as resp2:
+                        if resp2.status in (200, 201):
+                            return True, f"Pushed to LAVA: {lava_path}"
+                except Exception:
+                    pass
+        import sys
+        print(f"[ULAS] LAVA push error {e.code} on {lava_path}: {body[:200]}", file=sys.stderr)
+        return False, "Could not push attendance to LAVA. Please try again or download the CSV backup."
+    except Exception as e:
+        import sys
+        print(f"[ULAS] Unexpected LAVA push error: {e}", file=sys.stderr)
+        return False, "Could not push attendance to LAVA. Please download the CSV backup."
 
 
 # ── Cached reads (st.session_state) ──────────────────────────────────────────

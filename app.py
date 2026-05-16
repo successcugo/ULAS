@@ -22,6 +22,7 @@ from core import (
     session_to_csv_v2, build_csv_filename_v2,
 )
 from streamlit_cookies_manager import EncryptedCookieManager
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(
     page_title="ULAS — FUTO Attendance",
@@ -688,6 +689,9 @@ try:
 
             # ── Active session ────────────────────────────────────────────────────
             _tok_lifetime = load_settings().get("TOKEN_LIFETIME", 7)
+            # Rotate token server-side every TOKEN_LIFETIME seconds.
+            # Scoped inside this tab only — no login bleed.
+            st_autorefresh(interval=int(_tok_lifetime) * 1000, key=f"autorefresh_{tab_sfx}")
             session, refreshed = refresh_token(session, _tok_lifetime)
             if refreshed:
                 sha = save_session(rep["school"], rep["department"], rep["level"],

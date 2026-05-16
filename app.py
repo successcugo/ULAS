@@ -22,7 +22,6 @@ from core import (
     session_to_csv_v2, build_csv_filename_v2,
 )
 from streamlit_cookies_manager import EncryptedCookieManager
-from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(
     page_title="ULAS — FUTO Attendance",
@@ -689,9 +688,7 @@ try:
 
             # ── Active session ────────────────────────────────────────────────────
             _tok_lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-            # Rotate token server-side every TOKEN_LIFETIME seconds.
-            # Scoped inside this tab only — no login bleed.
-            st_autorefresh(interval=int(_tok_lifetime) * 1000, key=f"autorefresh_{tab_sfx}")
+            # Token rotation: flag needed, rerun handled after tab rendering below
             session, refreshed = refresh_token(session, _tok_lifetime)
             if refreshed:
                 sha = save_session(rep["school"], rep["department"], rep["level"],
@@ -739,7 +736,7 @@ try:
     <div class="label">Attendance Code</div>
 </div>""", unsafe_allow_html=True)
 
-            # ── Countdown display — pure Python, driven by st_autorefresh ──────────
+            # ── Countdown display — pure Python, updated on each rerun ────────────
             import math as _math
             _now_ts   = futo_ts()
             _tok_age  = _now_ts - (_tok_gen_raw if isinstance(_tok_gen_raw, (int, float))
@@ -881,10 +878,38 @@ try:
             )
 
         with rep_tab_lec:
-            _render_tab("LECTURE", "L")
+            try:
+                _render_tab("LECTURE", "L")
+            except Exception as _tab_err:
+                if type(_tab_err).__name__ in ("StopException", "RerunException"):
+                    raise
+                st.error(f"Something went wrong in Lecture tab. Please refresh.")
 
         with rep_tab_prac:
-            _render_tab("PRACTICAL", "P")
+            try:
+                _render_tab("PRACTICAL", "P")
+            except Exception as _tab_err:
+                if type(_tab_err).__name__ in ("StopException", "RerunException"):
+                    raise
+                st.error(f"Something went wrong in Practical tab. Please refresh.")
+
+        # ── Top-level token rotation rerun (safe — outside tabs) ─────────────────
+        _tok_lifetime_top = load_settings().get("TOKEN_LIFETIME", 7)
+        _now_top = futo_ts()
+        _rerun_due = False
+        for _sfx_check in ("L", "P"):
+            _sess_check = st.session_state.get(f"rep_sess_{_sfx_check}")
+            if _sess_check:
+                _tok_gen_check = _sess_check.get("token_generated_at", _now_top)
+                if isinstance(_tok_gen_check, (int, float)):
+                    _age = _now_top - float(_tok_gen_check)
+                    if _age >= int(_tok_lifetime_top):
+                        _rerun_due = True
+                        break
+        if _rerun_due:
+            import time as _time_top
+            _time_top.sleep(1)
+            st.rerun()
 
 
 except Exception as _err:

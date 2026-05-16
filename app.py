@@ -729,77 +729,43 @@ try:
             _started_disp = _started_at[11:16]
             _course     = session["course_code"]
 
-            # Convert timestamps to JS-safe milliseconds
-            # started_at is a datetime string; token_generated_at may be a Unix float
-            import datetime as _dt2
-            def _to_ms(val):
-                if val is None:
-                    return None
-                if isinstance(val, (int, float)):
-                    return int(float(val) * 1000)
-                # datetime string e.g. "2026-05-16 05:22:31"
-                try:
-                    import pytz as _pytz
-                    _tz = _pytz.timezone("Africa/Lagos")
-                except ImportError:
-                    _tz = _dt2.timezone(_dt2.timedelta(hours=1))
-                try:
-                    _d = _dt2.datetime.strptime(str(val)[:19], "%Y-%m-%d %H:%M:%S")
-                    _d = _d.replace(tzinfo=_tz)
-                    return int(_d.timestamp() * 1000)
-                except Exception:
-                    return None
-
-            _tok_gen_raw = session.get("token_generated_at", _started_at)
-            _tok_gen_ms  = _to_ms(_tok_gen_raw) or _to_ms(_started_at)
-            _att_start_ms = _to_ms(_started_at)
+            _tok_gen_raw = session.get("token_generated_at", futo_ts())
 
             st.markdown(f"### 🟢 Active — {_course}")
+            # ── Token display ─────────────────────────────────────────────────────
             st.markdown(f"""
 <div class="token-display">
     <div class="code">{_tok_val}</div>
     <div class="label">Attendance Code</div>
-</div>
-<div id="tok-cd{tab_sfx}" style="font-size:0.78rem;opacity:0.6;text-align:center;margin-top:0.3rem">
-    ⏱ Code refreshes in <b id="tok-s{tab_sfx}">…</b>s
-</div>
-<div style="margin:0.6rem 0 0.2rem">
-    <div id="att-cd{tab_sfx}" style="font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem">⏳ Loading…</div>
-    <div style="background:#333;border-radius:4px;height:6px;overflow:hidden">
-        <div id="att-bar{tab_sfx}" style="height:6px;border-radius:4px;background:#27ae60;width:100%"></div>
-    </div>
-</div>
-<div style="font-size:0.75rem;opacity:0.5;margin-top:0.35rem">
-    Started {_started_disp} · {_n_entries} entries
-</div>
-<script>
-(function(){{
-    var sfx="{tab_sfx}",tokGen=new Date({_tok_gen_ms}),
-        attSt=new Date({_att_start_ms}),
-        tokSecs={int(_tok_lifetime)},attMins={_att_lifetime},
-        action="{_att_action}",actLbl="{_act_label}";
-    function tick(){{
-        var now=new Date(),tElap=(now-tokGen)/1000,tLeft=Math.max(0,tokSecs-(tElap%tokSecs));
-        var aElap=(now-attSt)/1000/60,aLeft=attMins-aElap,aPct=Math.max(0,Math.min(1,aLeft/attMins));
-        var ts=document.getElementById("tok-s"+sfx);
-        if(ts) ts.textContent=Math.ceil(tLeft);
-        var ac=document.getElementById("att-cd"+sfx),ab=document.getElementById("att-bar"+sfx);
-        if(ac){{
-            if(aLeft<=0){{
-                ac.innerHTML="⏰ Window closed — "+(action==="flag"?"late entries flagged.":"auto-submitting…");
-                if(ab){{ab.style.width="0%";ab.style.background="#e74c3c";}}
-            }}else{{
-                var m=Math.floor(aLeft),s=Math.floor((aLeft-m)*60);
-                var col=aPct>0.5?"#27ae60":aPct>0.2?"#f39c12":"#e74c3c";
-                ac.innerHTML="⏳ "+m+"m "+s.toString().padStart(2,"0")+"s — "+actLbl;
-                if(ab){{ab.style.width=(aPct*100)+"%";ab.style.background=col;}}
-            }}
-        }}
-    }}
-    tick(); setInterval(tick,1000);
-}})();
-</script>""", unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
+            # ── Countdown display — pure Python, driven by st_autorefresh ──────────
+            import math as _math
+            _now_ts   = futo_ts()
+            _tok_age  = _now_ts - (_tok_gen_raw if isinstance(_tok_gen_raw, (int, float))
+                                   else _now_ts)
+            _tok_left = max(0, int(_tok_lifetime) - int(_tok_age % int(_tok_lifetime)))
+            st.caption(f"⏱ Code refreshes in **{_tok_left}s**")
+
+            _att_elapsed_m = att_elapsed_minutes(session)
+            _att_left_m    = _att_lifetime - _att_elapsed_m
+            if _att_left_m <= 0:
+                if _att_action == "flag":
+                    st.warning("⏰ Attendance window closed — new entries are marked Late.")
+            else:
+                _mins = int(_att_left_m)
+                _secs = int((_att_left_m - _mins) * 60)
+                _pct  = max(0.0, _att_left_m / _att_lifetime)
+                st.markdown(
+                    f"<div style='font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem'>"
+                    f"⏳ {_mins}m {_secs:02d}s remaining — "
+                    f"{'Flag late entries' if _att_action == 'flag' else 'Auto-submit when done'}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                st.progress(_pct)
+
+            st.caption(f"Started {_started_disp} · {_n_entries} entries")
             st.divider()
 
             # ── Manual add entry ──────────────────────────────────────────────────

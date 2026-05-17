@@ -276,42 +276,38 @@ def _render_tab(att_type, tab_sfx, rep):
 
     _tok_gen_raw = session.get("token_generated_at", futo_ts())
 
-    st.markdown(f"### 🟢 Active — {_course}")
-    # ── Token display ─────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div class="token-display">
-    <div class="code">{_tok_val}</div>
+    # ── Live section — fragment reruns every 1s, never touches rest of page ─────
+    @st.fragment(run_every=1)
+    def _live_display():
+        _curr = st.session_state.get(f"rep_sess_{tab_sfx}") or session
+        _curr_tok     = _curr.get("token", "----")
+        _curr_entries = len(_curr.get("entries", []))
+        _curr_course  = _curr.get("course_code", _course)
+
+        st.markdown(f"### 🟢 Active — {_curr_course}")
+        st.markdown(f"""<div class="token-display">
+    <div class="code">{_curr_tok}</div>
     <div class="label">Attendance Code</div>
-    </div>""", unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
-    # ── Attendance window status ──────────────────────────────────────────
-    _att_elapsed_m = att_elapsed_minutes(session)
-    _att_left_m    = _att_lifetime - _att_elapsed_m
-    if _att_left_m <= 0:
-        st.warning("⏰ Attendance window closed — new entries are marked Late.")
-    else:
-        _mins = int(_att_left_m)
-        _secs = int((_att_left_m - _mins) * 60)
-        _pct  = max(0.0, _att_left_m / _att_lifetime)
-        st.markdown(
-            f"<div style='font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem'>"
-            f"⏳ {_mins}m {_secs:02d}s remaining — "
-            f"{'Flag late entries' if _att_action == 'flag' else 'Auto-submit when done'}"
-            f"</div>",
-            unsafe_allow_html=True
+        _elapsed = att_elapsed_minutes(_curr)
+        _left    = _att_lifetime - _elapsed
+        if _left <= 0:
+            st.warning("⏰ Attendance window closed — new entries are marked Late.")
+        else:
+            _m = int(_left); _s = int((_left - _m) * 60)
+            st.markdown(
+                f"<div style='font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem'>"
+                f"⏳ {_m}m {_s:02d}s remaining — "
+                f"{'Flag late entries' if _att_action == 'flag' else 'Auto-submit when done'}"
+                f"</div>", unsafe_allow_html=True)
+            st.progress(max(0.0, _left / _att_lifetime))
+        st.caption(
+            f"Code rotates every {int(_tok_lifetime)}s · "
+            f"Started {_started_disp} · {_curr_entries} entries"
         )
-        st.progress(_pct)
-    st.caption(f"Code rotates every {int(_tok_lifetime)}s · Started {_started_disp} · {_n_entries} entries")
 
-    # ── Schedule next rerun for countdown tick ────────────────────────────────
-    _rerun_key = f"_rerun_at_{tab_sfx}"
-    import time as _t
-    _now = _t.time()
-    if _now >= st.session_state.get(_rerun_key, 0):
-        st.session_state[_rerun_key] = _now + 1
-        _t.sleep(1)
-        st.rerun()
-
+    _live_display()
     st.divider()
 
     # ── Manual add entry ──────────────────────────────────────────────────

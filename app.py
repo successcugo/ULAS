@@ -236,13 +236,7 @@ def _render_tab(att_type, tab_sfx, rep):
 
     # ── Active session ────────────────────────────────────────────────────
     _tok_lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-    # Token rotation: flag needed, rerun handled after tab rendering below
-    session, refreshed = refresh_token(session, _tok_lifetime)
-    if refreshed:
-        sha = save_session(rep["school"], rep["department"], rep["level"],
-                           session, sha, att_type=att_type)
-        st.session_state[_sess_key] = session
-        st.session_state[_sha_key]  = sha
+    # Token rotation is handled inside the fragment every second
 
     _att_action  = session.get("action", "flag")
     _att_lifetime = int(session.get("lifetime_minutes", 60))
@@ -279,7 +273,18 @@ def _render_tab(att_type, tab_sfx, rep):
     # ── Live section — fragment reruns every 1s, never touches rest of page ─────
     @st.fragment(run_every=1)
     def _live_display():
+        # Re-read from session state so we always have latest
         _curr = st.session_state.get(f"rep_sess_{tab_sfx}") or session
+        _curr_sha = st.session_state.get(f"rep_sha_{tab_sfx}")
+
+        # Rotate token if due — writes to GitHub and updates session state
+        _curr, refreshed = refresh_token(_curr, _tok_lifetime)
+        if refreshed:
+            _new_sha = save_session(rep["school"], rep["department"], rep["level"],
+                                    _curr, _curr_sha, att_type=att_type)
+            st.session_state[f"rep_sess_{tab_sfx}"] = _curr
+            st.session_state[f"rep_sha_{tab_sfx}"]  = _new_sha
+
         _curr_tok     = _curr.get("token", "----")
         _curr_entries = len(_curr.get("entries", []))
         _curr_course  = _curr.get("course_code", _course)
@@ -289,6 +294,12 @@ def _render_tab(att_type, tab_sfx, rep):
     <div class="code">{_curr_tok}</div>
     <div class="label">Attendance Code</div>
 </div>""", unsafe_allow_html=True)
+
+        # Token countdown — compute seconds left before next rotation
+        _tok_gen = _curr.get("token_generated_at", futo_ts())
+        _tok_age = futo_ts() - float(_tok_gen) if isinstance(_tok_gen, (int, float)) else 0
+        _tok_left = max(0, int(_tok_lifetime) - int(_tok_age % int(_tok_lifetime)))
+        st.caption(f"⏱ Code refreshes in **{_tok_left}s**")
 
         _elapsed = att_elapsed_minutes(_curr)
         _left    = _att_lifetime - _elapsed

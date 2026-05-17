@@ -5,7 +5,6 @@ Students sign attendance. Course reps manage attendance sessions.
 from __future__ import annotations
 
 import streamlit as st
-import time
 import pandas as pd
 
 from futo_data import get_schools, get_departments, get_levels
@@ -16,8 +15,8 @@ from core import (
     add_entry, edit_entry, delete_entry, validate_matric,
     delete_session, push_attendance_to_lava, session_to_csv,
     build_csv_filename, check_and_register_device,
-    futo_now, futo_now_str, load_active_semester,
-    is_school_time, att_remaining_minutes, is_att_expired,
+    futo_now, futo_now_str, futo_ts, load_active_semester,
+    is_school_time, att_remaining_minutes, att_elapsed_minutes, is_att_expired,
     add_entry_v2, flag_concurrent_in_other_session,
     session_to_csv_v2, build_csv_filename_v2,
 )
@@ -146,26 +145,283 @@ def _on_level():
 
 # ── Branded error screen ─────────────────────────────────────────────────────
 def _show_error(exc: Exception):
-    st.markdown("""
-    <div style="
-        max-width:520px; margin:4rem auto; padding:2.5rem 2rem;
-        background:rgba(0,100,0,0.08); border:1.5px solid rgba(0,100,0,0.25);
-        border-radius:16px; text-align:center;
-    ">
-        <div style="font-size:3rem; margin-bottom:0.5rem;">⚠️</div>
-        <h2 style="color:#006400; margin:0 0 0.5rem;">Something went wrong</h2>
-        <p style="opacity:0.7; font-size:0.92rem; margin:0 0 1.5rem;">
-            An unexpected error occurred. Please try refreshing the page.<br>
-            If the problem persists, contact your course rep or ICT.
-        </p>
-        <button onclick="window.location.reload()"
-            style="background:#006400; color:white; border:none; border-radius:8px;
-                   padding:0.6rem 1.8rem; font-size:1rem; cursor:pointer; font-weight:600;">
-            🔄 Refresh Page
-        </button>
-    </div>
-    """, unsafe_allow_html=True)
+    import traceback
+    tb = traceback.format_exc()
+    st.error(f"**{type(exc).__name__}: {exc}**")
+    st.code(tb[-2000:], language="python")
 
+
+
+def _render_tab(att_type, tab_sfx, rep):
+    try:
+        """Render a fully self-contained attendance tab for one type."""
+        # ── Show push success banner and stop — prevents stale controls rendering
+        if st.session_state.get(f"push_success_{tab_sfx}"):
+            st.success(f"✅ {att_type.title()} attendance pushed to LAVA successfully!")
+            if st.button("Start New Session", key=f"new_after_push_{tab_sfx}",
+                         type="primary"):
+                st.session_state[f"push_success_{tab_sfx}"] = False
+                st.rerun()
+            return
+
+        _sess_key = f"rep_sess_{tab_sfx}"
+        _sha_key  = f"rep_sha_{tab_sfx}"
+        _loaded_key = f"rep_loaded_{tab_sfx}"
+
+        # ── Load session from GitHub if not yet loaded this run ───────────────
+        if not st.session_state.get(_loaded_key):
+            with st.spinner(f"Loading {att_type.title()} session..."):
+                _s, _sh = load_session(rep["school"], rep["department"],
+                                       rep["level"], att_type=att_type)
+            st.session_state[_sess_key]   = _s
+            st.session_state[_sha_key]    = _sh
+            st.session_state[_loaded_key] = True
+
+        session = st.session_state.get(_sess_key)
+        sha     = st.session_state.get(_sha_key)
+
+        # ── No active session — start form ────────────────────────────────────
+        if not session:
+            _time_ok, _time_msg = is_school_time()
+            if not _time_ok:
+                st.markdown(f"""<div class="info-card" style="text-align:center;padding:1.5rem">
+                    <div style="font-size:2rem">🕐</div>
+                    <b>Outside School Hours</b><br>
+                    <span style="opacity:0.75">{_time_msg}</span>
+                </div>""", unsafe_allow_html=True)
+                return
+
+            _sem_check = load_active_semester()
+            if not _sem_check:
+                st.warning("🔒 No active semester. ICT must start a semester first.")
+                return
+
+            st.markdown(f"### ▶ Start {att_type.title()} Attendance")
+            with st.form(f"start_{tab_sfx}"):
+                course_code = st.text_input("Course Code", placeholder="e.g. CSC301",
+                                            key=f"cc_{tab_sfx}")
+                start_btn   = st.form_submit_button("▶ Start", type="primary")
+
+            if start_btn:
+                if not course_code.strip():
+                    st.error("Please enter a course code.")
+                else:
+                    with st.spinner("Starting..."):
+                        _new_s, _new_sha = start_session(
+                            rep["school"], rep["department"], rep["level"],
+                            course_code, rep["username"], att_type=att_type,
+                        )
+                    st.session_state[_sess_key]   = _new_s
+                    st.session_state[_sha_key]    = _new_sha
+                    st.session_state[_loaded_key] = True
+                    st.session_state[f"rep_kill_triggered_{tab_sfx}"] = False
+                    st.rerun()
+
+            # ── Session history for this type ─────────────────────────────────
+            st.divider()
+            st.markdown("### 📋 Session History")
+            with st.spinner("Loading..."):
+                _hist = load_session_history(rep["username"])
+            if _hist:
+                import pandas as _pd2
+                _hdf = _pd2.DataFrame([h for h in _hist
+                                       if h.get("att_type","LECTURE") == att_type])
+                if not _hdf.empty:
+                    _hdf.columns = [c.replace("_"," ").title() for c in _hdf.columns]
+                    st.dataframe(_hdf, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"No past {att_type.title()} sessions yet.")
+            else:
+                st.info("No past sessions yet.")
+            return
+
+        # ── Active session ────────────────────────────────────────────────────
+        _tok_lifetime = load_settings().get("TOKEN_LIFETIME", 7)
+        # Token rotation: flag needed, rerun handled after tab rendering below
+        session, refreshed = refresh_token(session, _tok_lifetime)
+        if refreshed:
+            sha = save_session(rep["school"], rep["department"], rep["level"],
+                               session, sha, att_type=att_type)
+            st.session_state[_sess_key] = session
+            st.session_state[_sha_key]  = sha
+
+        _att_action  = session.get("action", "flag")
+        _att_lifetime = int(session.get("lifetime_minutes", 60))
+        _att_expired  = is_att_expired(session)
+
+        # ── Kill: auto-push when timer hits zero ──────────────────────────────
+        _kill_key = f"rep_kill_triggered_{tab_sfx}"
+        if not st.session_state.get(_kill_key):
+            st.session_state[_kill_key] = False
+        if _att_expired and _att_action == "kill" and not st.session_state[_kill_key]:
+            st.session_state[_kill_key] = True
+            with st.spinner("⏱ Time's up! Auto-submitting..."):
+                _ok_k, _msg_k = push_attendance_to_lava(session)
+                if _ok_k:
+                    delete_session(rep["school"], rep["department"],
+                                   rep["level"], att_type=att_type)
+                    st.session_state[_sess_key]   = None
+                    st.session_state[_sha_key]    = None
+                    st.session_state[_loaded_key] = False
+                    st.session_state[_kill_key]   = False
+            st.success(f"✅ Auto-submitted to LAVA. {_msg_k}")
+            st.rerun()
+
+        # ── Token + JS countdown ──────────────────────────────────────────────
+        _tok_val    = session["token"]
+        _started_at = session["started_at"]
+        _act_label  = "Flag late entries" if _att_action == "flag" else "Auto-submit when done"
+        _n_entries  = len(session["entries"])
+        _started_disp = _started_at[11:16]
+        _course     = session["course_code"]
+
+        _tok_gen_raw = session.get("token_generated_at", futo_ts())
+
+        st.markdown(f"### 🟢 Active — {_course}")
+        # ── Token display ─────────────────────────────────────────────────────
+        st.markdown(f"""
+    <div class="token-display">
+        <div class="code">{_tok_val}</div>
+        <div class="label">Attendance Code</div>
+    </div>""", unsafe_allow_html=True)
+
+        # ── Attendance window status ──────────────────────────────────────────
+        _att_elapsed_m = att_elapsed_minutes(session)
+        _att_left_m    = _att_lifetime - _att_elapsed_m
+        if _att_left_m <= 0:
+            st.warning("⏰ Attendance window closed — new entries are marked Late.")
+        else:
+            _mins = int(_att_left_m)
+            _secs = int((_att_left_m - _mins) * 60)
+            _pct  = max(0.0, _att_left_m / _att_lifetime)
+            st.markdown(
+                f"<div style='font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem'>"
+                f"⏳ {_mins}m {_secs:02d}s remaining — "
+                f"{'Flag late entries' if _att_action == 'flag' else 'Auto-submit when done'}"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            st.progress(_pct)
+        st.caption(f"Code rotates every {int(_tok_lifetime)}s · Started {_started_disp} · {_n_entries} entries")
+        st.divider()
+
+        # ── Manual add entry ──────────────────────────────────────────────────
+        with st.expander("➕ Manually Add Entry"):
+            with st.form(f"manual_add_{tab_sfx}"):
+                ma_sur = st.text_input("Surname",       key=f"ma_sur_{tab_sfx}")
+                ma_oth = st.text_input("Other Names",   key=f"ma_oth_{tab_sfx}")
+                ma_mat = st.text_input("Matric Number (11 digits)", max_chars=11,
+                                       key=f"ma_mat_{tab_sfx}")
+                ma_btn = st.form_submit_button("Add Entry")
+            if ma_btn:
+                if not all([ma_sur.strip(), ma_oth.strip(), ma_mat.strip()]):
+                    st.error("All fields are required.")
+                else:
+                    ok_m, m_msg = validate_matric(ma_mat)
+                    if not ok_m:
+                        st.error(m_msg)
+                    else:
+                        ok_a, a_msg = add_entry(session, ma_sur, ma_oth, ma_mat)
+                        if ok_a:
+                            sha = save_session(rep["school"], rep["department"],
+                                               rep["level"], session, sha,
+                                               att_type=att_type)
+                            st.session_state[_sess_key] = session
+                            st.session_state[_sha_key]  = sha
+                            st.success(f"✅ {a_msg}")
+                            st.rerun()
+                        else:
+                            st.error(a_msg)
+
+        # ── Entry table ───────────────────────────────────────────────────────
+        if session["entries"]:
+            import pandas as _pd3
+            _edf = _pd3.DataFrame(session["entries"])
+            _col_map = {"sn":"S/N","surname":"Surname","other_names":"Other Names",
+                        "matric":"Matric","time":"Time","late":"Late","concurrent":"Concurrent"}
+            _edf = _edf.rename(columns=_col_map)
+            _show_cols = [c for c in ["S/N","Surname","Other Names","Matric","Time","Late","Concurrent"]
+                          if c in _edf.columns]
+            st.dataframe(_edf[_show_cols], use_container_width=True, hide_index=True)
+        else:
+            st.caption("No entries yet.")
+
+        # ── Edit / Delete entries ─────────────────────────────────────────────
+        if session["entries"]:
+            with st.expander("✏️ Edit / Delete an Entry"):
+                _entry_opts = {f"{e['sn']}. {e['surname']} {e['other_names']} — {e['matric']}": e["sn"]
+                               for e in session["entries"]}
+                _sel_e = st.selectbox("Select entry", list(_entry_opts.keys()),
+                                      key=f"edit_sel_{tab_sfx}")
+                _sel_sn = _entry_opts[_sel_e]
+                _ec1, _ec2 = st.columns(2)
+                with _ec1:
+                    if st.button("🗑️ Delete Entry", key=f"del_{tab_sfx}",
+                                 use_container_width=True):
+                        ok_d, d_msg = delete_entry(session, _sel_sn)
+                        if ok_d:
+                            sha = save_session(rep["school"], rep["department"],
+                                               rep["level"], session, sha,
+                                               att_type=att_type)
+                            st.session_state[_sess_key] = session
+                            st.session_state[_sha_key]  = sha
+                            st.success(d_msg)
+                            st.rerun()
+                        else:
+                            st.error(d_msg)
+
+        # ── End session ───────────────────────────────────────────────────────
+        st.divider()
+        _end_key = f"show_end_{tab_sfx}"
+        if not st.session_state.get(_end_key):
+            st.session_state[_end_key] = False
+
+        if not st.session_state[_end_key]:
+            if st.button(f"🔴 End & Push {att_type.title()} Attendance",
+                         key=f"end_btn_{tab_sfx}", type="primary",
+                         use_container_width=True):
+                st.session_state[_end_key] = True
+                st.rerun()
+        else:
+            st.warning(f"Push **{len(session['entries'])} entries** to LAVA and end this session?")
+            _cc1, _cc2 = st.columns(2)
+            with _cc1:
+                if st.button("✅ Confirm Push", key=f"conf_{tab_sfx}",
+                             type="primary", use_container_width=True):
+                    with st.spinner("Pushing to LAVA..."):
+                        _ok_p, _msg_p = push_attendance_to_lava(session)
+                    if _ok_p:
+                        delete_session(rep["school"], rep["department"],
+                                       rep["level"], att_type=att_type)
+                        st.session_state[_sess_key]   = None
+                        st.session_state[_sha_key]    = None
+                        st.session_state[_loaded_key] = False
+                        st.session_state[_end_key]    = False
+                        st.session_state[f"push_success_{tab_sfx}"] = True
+                        st.rerun()
+                    else:
+                        st.error(f"Push failed: {_msg_p}")
+            with _cc2:
+                if st.button("Cancel", key=f"cancel_{tab_sfx}",
+                             use_container_width=True):
+                    st.session_state[_end_key] = False
+                    st.rerun()
+
+        # ── CSV backup download ───────────────────────────────────────────────
+        st.download_button(
+            "⬇️ Download CSV Backup",
+            session_to_csv(session),
+            file_name=build_csv_filename(session),
+            mime="text/csv", use_container_width=True,
+            key=f"csv_{tab_sfx}",
+        )
+
+    except Exception as _render_err:
+        if type(_render_err).__name__ in ("StopException", "RerunException"):
+            raise
+        import traceback as _tb
+        st.error(f"Tab error ({att_type}): {type(_render_err).__name__}: {_render_err}")
+        st.code(_tb.format_exc())
 
 
 # ── Main app body ─────────────────────────────────────────────────────────────
@@ -536,380 +792,29 @@ try:
         with hc2:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Logout"):
+                # Clear DEFAULTS
                 for k, v in DEFAULTS.items():
                     st.session_state[k] = v
+                # Clear all dynamic tab-scoped keys that aren't in DEFAULTS
+                for _sfx in ("L", "P"):
+                    for _dk in (f"rep_sess_{_sfx}", f"rep_sha_{_sfx}",
+                                f"rep_loaded_{_sfx}", f"rep_kill_triggered_{_sfx}",
+                                f"show_end_{_sfx}", f"push_success_{_sfx}",
+                                f"next_rerun_{_sfx}", f"autorefresh_{_sfx}"):
+                        st.session_state.pop(_dk, None)
                 st.rerun()
-
-        # ── Session loading strategy ───────────────────────────────────────────────
-        # Only fetch from GitHub once per login (when rep_session_loaded is False).
-        # After that, rep_session in st.session_state is the source of truth.
-        # This prevents the forced-logout race condition caused by re-fetching
-        # immediately after start_session writes to GitHub.
-        if not st.session_state.rep_session_loaded:
-            # Load whichever type was last active (try both, prefer LECTURE)
-            with st.spinner("Loading session..."):
-                _lec_s, _lec_sha  = load_session(rep["school"], rep["department"],
-                                                  rep["level"], att_type="LECTURE")
-                _prac_s, _prac_sha = load_session(rep["school"], rep["department"],
-                                                   rep["level"], att_type="PRACTICAL")
-            # Use whichever is active; prefer most recently started
-            if _lec_s and _prac_s:
-                session = _lec_s; sha = _lec_sha
-                st.session_state.rep_att_type = "LECTURE"
-            elif _lec_s:
-                session = _lec_s; sha = _lec_sha
-                st.session_state.rep_att_type = "LECTURE"
-            elif _prac_s:
-                session = _prac_s; sha = _prac_sha
-                st.session_state.rep_att_type = "PRACTICAL"
-            else:
-                session = None; sha = None
-            st.session_state.rep_session        = session
-            st.session_state.rep_session_sha    = sha
-            st.session_state.rep_session_loaded = True
-
-        session = st.session_state.rep_session
-        sha     = st.session_state.rep_session_sha
-
-        # ── Rep-to-Rep Handoff check ──────────────────────────────────────────
-        # If session was started by a different rep, show an explicit take-over card
-        if (session and
-                session.get("rep_username") != rep["username"] and
-                not st.session_state.get("takeover_confirmed")):
-            other = session.get("rep_username", "another rep")
-            st.markdown("### 🔄 Active Session — Different Rep")
-            st.markdown(f"""<div class="info-card">
-                A session for <b>Level {session['level']}L — {session['course_code']}</b>
-                was started by <b>{other}</b> at {session['started_at'][11:16]}.<br>
-                <span style="opacity:0.7">
-                    You can take over management of this session,
-                    or wait for {other} to end it.
-                </span>
-            </div>""", unsafe_allow_html=True)
-            tc1, tc2 = st.columns(2)
-            with tc1:
-                if st.button("🔄 Take Over Session", type="primary", use_container_width=True):
-                    # Record the takeover in the session JSON
-                    fs, fs_sha = load_session(rep["school"], rep["department"], rep["level"])
-                    if fs:
-                        fs["rep_username"] = rep["username"]
-                        fs.setdefault("takeover_log", []).append({
-                            "taken_by": rep["username"],
-                            "from":     other,
-                            "at":       futo_now_str(),
-                        })
-                        new_sha = save_session(rep["school"], rep["department"], rep["level"], fs, fs_sha)
-                        st.session_state.rep_session        = fs
-                        st.session_state.rep_session_sha    = new_sha
-                        st.session_state.takeover_confirmed = True
-                        st.success(f"✅ You have taken over the session from {other}.")
-                        st.rerun()
-            with tc2:
-                if st.button("👁️ View Only (no changes)", use_container_width=True):
-                    st.session_state.takeover_confirmed = True
-                    st.rerun()
-            st.stop()
 
         # ── Rep tabs: Sessions | Start ────────────────────────────────────────────
         rep_tab_lec, rep_tab_prac = st.tabs(["📖 Lecture Attendance", "🔬 Practical Attendance"])
 
-        def _render_tab(att_type, tab_sfx):
-            """Render a fully self-contained attendance tab for one type."""
-            _sess_key = f"rep_sess_{tab_sfx}"
-            _sha_key  = f"rep_sha_{tab_sfx}"
-            _loaded_key = f"rep_loaded_{tab_sfx}"
-
-            # ── Load session from GitHub if not yet loaded this run ───────────────
-            if not st.session_state.get(_loaded_key):
-                with st.spinner(f"Loading {att_type.title()} session..."):
-                    _s, _sh = load_session(rep["school"], rep["department"],
-                                           rep["level"], att_type=att_type)
-                st.session_state[_sess_key]   = _s
-                st.session_state[_sha_key]    = _sh
-                st.session_state[_loaded_key] = True
-
-            session = st.session_state.get(_sess_key)
-            sha     = st.session_state.get(_sha_key)
-
-            # ── No active session — start form ────────────────────────────────────
-            if not session:
-                _time_ok, _time_msg = is_school_time()
-                if not _time_ok:
-                    st.markdown(f"""<div class="info-card" style="text-align:center;padding:1.5rem">
-                        <div style="font-size:2rem">🕐</div>
-                        <b>Outside School Hours</b><br>
-                        <span style="opacity:0.75">{_time_msg}</span>
-                    </div>""", unsafe_allow_html=True)
-                    return
-
-                _sem_check = load_active_semester()
-                if not _sem_check:
-                    st.warning("🔒 No active semester. ICT must start a semester first.")
-                    return
-
-                st.markdown(f"### ▶ Start {att_type.title()} Attendance")
-                with st.form(f"start_{tab_sfx}"):
-                    course_code = st.text_input("Course Code", placeholder="e.g. CSC301",
-                                                key=f"cc_{tab_sfx}")
-                    start_btn   = st.form_submit_button("▶ Start", type="primary")
-
-                if start_btn:
-                    if not course_code.strip():
-                        st.error("Please enter a course code.")
-                    else:
-                        with st.spinner("Starting..."):
-                            _new_s, _new_sha = start_session(
-                                rep["school"], rep["department"], rep["level"],
-                                course_code, rep["username"], att_type=att_type,
-                            )
-                        st.session_state[_sess_key]   = _new_s
-                        st.session_state[_sha_key]    = _new_sha
-                        st.session_state[_loaded_key] = True
-                        st.session_state[f"rep_kill_triggered_{tab_sfx}"] = False
-                        st.rerun()
-
-                # ── Session history for this type ─────────────────────────────────
-                st.divider()
-                st.markdown("### 📋 Session History")
-                with st.spinner("Loading..."):
-                    _hist = load_session_history(rep["username"])
-                if _hist:
-                    import pandas as _pd2
-                    _hdf = _pd2.DataFrame([h for h in _hist
-                                           if h.get("att_type","LECTURE") == att_type])
-                    if not _hdf.empty:
-                        _hdf.columns = [c.replace("_"," ").title() for c in _hdf.columns]
-                        st.dataframe(_hdf, use_container_width=True, hide_index=True)
-                    else:
-                        st.info(f"No past {att_type.title()} sessions yet.")
-                else:
-                    st.info("No past sessions yet.")
-                return
-
-            # ── Active session ────────────────────────────────────────────────────
-            _tok_lifetime = load_settings().get("TOKEN_LIFETIME", 7)
-            # Token rotation: flag needed, rerun handled after tab rendering below
-            session, refreshed = refresh_token(session, _tok_lifetime)
-            if refreshed:
-                sha = save_session(rep["school"], rep["department"], rep["level"],
-                                   session, sha, att_type=att_type)
-                st.session_state[_sess_key] = session
-                st.session_state[_sha_key]  = sha
-
-            _att_action  = session.get("action", "flag")
-            _att_lifetime = int(session.get("lifetime_minutes", 60))
-            _att_expired  = is_att_expired(session)
-
-            # ── Kill: auto-push when timer hits zero ──────────────────────────────
-            _kill_key = f"rep_kill_triggered_{tab_sfx}"
-            if not st.session_state.get(_kill_key):
-                st.session_state[_kill_key] = False
-            if _att_expired and _att_action == "kill" and not st.session_state[_kill_key]:
-                st.session_state[_kill_key] = True
-                with st.spinner("⏱ Time's up! Auto-submitting..."):
-                    _ok_k, _msg_k = push_attendance_to_lava(session)
-                    if _ok_k:
-                        delete_session(rep["school"], rep["department"],
-                                       rep["level"], att_type=att_type)
-                        st.session_state[_sess_key]   = None
-                        st.session_state[_sha_key]    = None
-                        st.session_state[_loaded_key] = False
-                        st.session_state[_kill_key]   = False
-                st.success(f"✅ Auto-submitted to LAVA. {_msg_k}")
-                st.rerun()
-
-            # ── Token + JS countdown ──────────────────────────────────────────────
-            _tok_val    = session["token"]
-            _started_at = session["started_at"]
-            _act_label  = "Flag late entries" if _att_action == "flag" else "Auto-submit when done"
-            _n_entries  = len(session["entries"])
-            _started_disp = _started_at[11:16]
-            _course     = session["course_code"]
-
-            _tok_gen_raw = session.get("token_generated_at", futo_ts())
-
-            st.markdown(f"### 🟢 Active — {_course}")
-            # ── Token display ─────────────────────────────────────────────────────
-            st.markdown(f"""
-<div class="token-display">
-    <div class="code">{_tok_val}</div>
-    <div class="label">Attendance Code</div>
-</div>""", unsafe_allow_html=True)
-
-            # ── Countdown display — pure Python, updated on each rerun ────────────
-            import math as _math
-            _now_ts   = futo_ts()
-            _tok_age  = _now_ts - (_tok_gen_raw if isinstance(_tok_gen_raw, (int, float))
-                                   else _now_ts)
-            _tok_left = max(0, int(_tok_lifetime) - int(_tok_age % int(_tok_lifetime)))
-            st.caption(f"⏱ Code refreshes in **{_tok_left}s**")
-
-            _att_elapsed_m = att_elapsed_minutes(session)
-            _att_left_m    = _att_lifetime - _att_elapsed_m
-            if _att_left_m <= 0:
-                if _att_action == "flag":
-                    st.warning("⏰ Attendance window closed — new entries are marked Late.")
-            else:
-                _mins = int(_att_left_m)
-                _secs = int((_att_left_m - _mins) * 60)
-                _pct  = max(0.0, _att_left_m / _att_lifetime)
-                st.markdown(
-                    f"<div style='font-size:0.85rem;opacity:0.8;margin-bottom:0.3rem'>"
-                    f"⏳ {_mins}m {_secs:02d}s remaining — "
-                    f"{'Flag late entries' if _att_action == 'flag' else 'Auto-submit when done'}"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-                st.progress(_pct)
-
-            st.caption(f"Started {_started_disp} · {_n_entries} entries")
-            st.divider()
-
-            # ── Manual add entry ──────────────────────────────────────────────────
-            with st.expander("➕ Manually Add Entry"):
-                with st.form(f"manual_add_{tab_sfx}"):
-                    ma_sur = st.text_input("Surname",       key=f"ma_sur_{tab_sfx}")
-                    ma_oth = st.text_input("Other Names",   key=f"ma_oth_{tab_sfx}")
-                    ma_mat = st.text_input("Matric Number (11 digits)", max_chars=11,
-                                           key=f"ma_mat_{tab_sfx}")
-                    ma_btn = st.form_submit_button("Add Entry")
-                if ma_btn:
-                    if not all([ma_sur.strip(), ma_oth.strip(), ma_mat.strip()]):
-                        st.error("All fields are required.")
-                    else:
-                        ok_m, m_msg = validate_matric(ma_mat)
-                        if not ok_m:
-                            st.error(m_msg)
-                        else:
-                            ok_a, a_msg = add_entry(session, ma_sur, ma_oth, ma_mat)
-                            if ok_a:
-                                sha = save_session(rep["school"], rep["department"],
-                                                   rep["level"], session, sha,
-                                                   att_type=att_type)
-                                st.session_state[_sess_key] = session
-                                st.session_state[_sha_key]  = sha
-                                st.success(f"✅ {a_msg}")
-                                st.rerun()
-                            else:
-                                st.error(a_msg)
-
-            # ── Entry table ───────────────────────────────────────────────────────
-            if session["entries"]:
-                import pandas as _pd3
-                _edf = _pd3.DataFrame(session["entries"])
-                _col_map = {"sn":"S/N","surname":"Surname","other_names":"Other Names",
-                            "matric":"Matric","time":"Time","late":"Late","concurrent":"Concurrent"}
-                _edf = _edf.rename(columns=_col_map)
-                _show_cols = [c for c in ["S/N","Surname","Other Names","Matric","Time","Late","Concurrent"]
-                              if c in _edf.columns]
-                st.dataframe(_edf[_show_cols], use_container_width=True, hide_index=True)
-            else:
-                st.caption("No entries yet.")
-
-            # ── Edit / Delete entries ─────────────────────────────────────────────
-            if session["entries"]:
-                with st.expander("✏️ Edit / Delete an Entry"):
-                    _entry_opts = {f"{e['sn']}. {e['surname']} {e['other_names']} — {e['matric']}": e["sn"]
-                                   for e in session["entries"]}
-                    _sel_e = st.selectbox("Select entry", list(_entry_opts.keys()),
-                                          key=f"edit_sel_{tab_sfx}")
-                    _sel_sn = _entry_opts[_sel_e]
-                    _ec1, _ec2 = st.columns(2)
-                    with _ec1:
-                        if st.button("🗑️ Delete Entry", key=f"del_{tab_sfx}",
-                                     use_container_width=True):
-                            ok_d, d_msg = delete_entry(session, _sel_sn)
-                            if ok_d:
-                                sha = save_session(rep["school"], rep["department"],
-                                                   rep["level"], session, sha,
-                                                   att_type=att_type)
-                                st.session_state[_sess_key] = session
-                                st.session_state[_sha_key]  = sha
-                                st.success(d_msg)
-                                st.rerun()
-                            else:
-                                st.error(d_msg)
-
-            # ── End session ───────────────────────────────────────────────────────
-            st.divider()
-            _end_key = f"show_end_{tab_sfx}"
-            if not st.session_state.get(_end_key):
-                st.session_state[_end_key] = False
-
-            if not st.session_state[_end_key]:
-                if st.button(f"🔴 End & Push {att_type.title()} Attendance",
-                             key=f"end_btn_{tab_sfx}", type="primary",
-                             use_container_width=True):
-                    st.session_state[_end_key] = True
-                    st.rerun()
-            else:
-                st.warning(f"Push **{len(session['entries'])} entries** to LAVA and end this session?")
-                _cc1, _cc2 = st.columns(2)
-                with _cc1:
-                    if st.button("✅ Confirm Push", key=f"conf_{tab_sfx}",
-                                 type="primary", use_container_width=True):
-                        with st.spinner("Pushing to LAVA..."):
-                            _ok_p, _msg_p = push_attendance_to_lava(session)
-                        if _ok_p:
-                            delete_session(rep["school"], rep["department"],
-                                           rep["level"], att_type=att_type)
-                            st.session_state[_sess_key]   = None
-                            st.session_state[_sha_key]    = None
-                            st.session_state[_loaded_key] = False
-                            st.session_state[_end_key]    = False
-                            st.success("✅ Pushed to LAVA!")
-                            time.sleep(2)
-                            st.rerun()
-                        else:
-                            st.error(f"Push failed: {_msg_p}")
-                with _cc2:
-                    if st.button("Cancel", key=f"cancel_{tab_sfx}",
-                                 use_container_width=True):
-                        st.session_state[_end_key] = False
-                        st.rerun()
-
-            # ── CSV backup download ───────────────────────────────────────────────
-            st.download_button(
-                "⬇️ Download CSV Backup",
-                session_to_csv(session),
-                file_name=build_csv_filename(session),
-                mime="text/csv", use_container_width=True,
-                key=f"csv_{tab_sfx}",
-            )
 
         with rep_tab_lec:
-            try:
-                _render_tab("LECTURE", "L")
-            except Exception as _tab_err:
-                if type(_tab_err).__name__ in ("StopException", "RerunException"):
-                    raise
-                st.error(f"Something went wrong in Lecture tab. Please refresh.")
+            _render_tab("LECTURE", "L", rep)
 
         with rep_tab_prac:
-            try:
-                _render_tab("PRACTICAL", "P")
-            except Exception as _tab_err:
-                if type(_tab_err).__name__ in ("StopException", "RerunException"):
-                    raise
-                st.error(f"Something went wrong in Practical tab. Please refresh.")
+            _render_tab("PRACTICAL", "P", rep)
 
-        # ── Top-level token rotation rerun (safe — outside tabs) ─────────────────
-        _tok_lifetime_top = load_settings().get("TOKEN_LIFETIME", 7)
-        _now_top = futo_ts()
-        _rerun_due = False
-        for _sfx_check in ("L", "P"):
-            _sess_check = st.session_state.get(f"rep_sess_{_sfx_check}")
-            if _sess_check:
-                _tok_gen_check = _sess_check.get("token_generated_at", _now_top)
-                if isinstance(_tok_gen_check, (int, float)):
-                    _age = _now_top - float(_tok_gen_check)
-                    if _age >= int(_tok_lifetime_top):
-                        _rerun_due = True
-                        break
-        if _rerun_due:
-            import time as _time_top
-            _time_top.sleep(1)
-            st.rerun()
+
 
 
 except Exception as _err:
